@@ -718,9 +718,9 @@ export function EmailComposer({
         } catch (error) {
           console.error('Escrow error:', error);
 
-          // Try to extract more detailed error information
+          // Escrow must succeed before a new email can be sent.
+          // If anything fails here, block send and surface a clear error.
           let errorMessage = 'Unknown error';
-          let shouldBlockSend = false;
 
           if (error instanceof Error) {
             errorMessage = error.message;
@@ -735,16 +735,6 @@ export function EmailComposer({
               errorMessage += ` (cause: ${JSON.stringify((error as any).cause)})`;
             }
 
-            // Check for specific error types that should block sending
-            // If wallet is not connected or user rejected, block send
-            if (
-              errorMessage.includes('User rejected') ||
-              errorMessage.includes('not connected') ||
-              errorMessage.includes('Wallet not connected')
-            ) {
-              shouldBlockSend = true;
-            }
-
             // Log full error object for debugging
             console.error('Full error object:', {
               name: error.name,
@@ -755,20 +745,8 @@ export function EmailComposer({
             });
           }
 
-          if (shouldBlockSend) {
-            //toast.error(`Escrow creation failed: ${errorMessage}. Email not sent.`, { id: 'payment' });
-            return; // Don't send email if escrow creation fails due to wallet issues
-          } else {
-            // For other errors (network issues, etc.), allow email to send but warn user
-            console.warn('⚠️ Escrow creation failed but allowing email to send:', errorMessage);
-            /*
-            toast.warning(`Escrow creation failed: ${errorMessage}. Email will still be sent without escrow.`, { 
-              id: 'payment',
-              duration: 8000,
-            });
-            */
-            // Continue with email sending (don't return)
-          }
+          toast.error(`Escrow creation failed: ${errorMessage}. Email not sent.`, { id: 'payment' });
+          return;
         }
       } // Close if (!isReply) block
 
