@@ -36,7 +36,10 @@ export const authProviders = (env: Record<string, string>): ProviderConfig[] => 
       { name: 'GOOGLE_CLIENT_SECRET', source: 'Google Cloud Console' },
     ],
     config: {
-      prompt: env.FORCE_GOOGLE_AUTH ? 'consent' : undefined,
+      // Google only returns refresh tokens consistently when consent is re-prompted.
+      // Force this in non-production to avoid local auth failures.
+      prompt:
+        env.FORCE_GOOGLE_AUTH === 'true' || env.NODE_ENV !== 'production' ? 'consent' : undefined,
       accessType: 'offline',
       scope: [
         'https://mail.google.com/',
