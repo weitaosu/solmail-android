@@ -69,6 +69,8 @@ function LoginClientContent({ providers, isProd }: LoginClientProps) {
   const navigate = useNavigate();
   const [expandedProviders, setExpandedProviders] = useState<Record<string, boolean>>({});
   const [error, _] = useQueryState('error');
+  const [callbackURL] = useQueryState('callbackURL');
+  const [mobileRedirect] = useQueryState('mobileRedirect');
 
   useEffect(() => {
     const missing = providers.find((p) => p.required && !p.enabled);
@@ -106,13 +108,18 @@ function LoginClientContent({ providers, isProd }: LoginClientProps) {
   const shouldShowSimplifiedMessage = isProd && hasMissingRequiredProviders;
 
   const handleProviderClick = (provider: Provider) => {
+    const computedCallbackURL =
+      mobileRedirect && mobileRedirect.startsWith('solmailandroid://')
+        ? `${window.location.origin}/mail/inbox?mobileRedirect=${encodeURIComponent(mobileRedirect)}`
+        : callbackURL || `${window.location.origin}/mail`;
+
     if (provider.isCustom && provider.customRedirectPath) {
       navigate(provider.customRedirectPath);
     } else {
       toast.promise(
         signIn.social({
           provider: provider.id as any,
-          callbackURL: `${window.location.origin}/mail`, //where user is directed to after auth
+          callbackURL: computedCallbackURL, //where user is directed to after auth
         }),
         {
           error: 'Login redirect failed',

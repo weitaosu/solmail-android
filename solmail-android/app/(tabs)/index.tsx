@@ -3,6 +3,9 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useMobileWallet } from '@/src/wallet/mobile-wallet-provider';
 import { useRouter } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
+import * as Linking from 'expo-linking';
+
+WebBrowser.maybeCompleteAuthSession();
 
 export default function HomeScreen() {
   const { account, signIn, disconnect } = useMobileWallet();
@@ -32,13 +35,30 @@ export default function HomeScreen() {
     try {
       setBusy(true);
       setStatus('Opening Google login...');
-      const appUrl = process.env.EXPO_PUBLIC_BACKEND_URL?.replace(':8787', ':3000');
-      if (!appUrl) {
+      const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL;
+      if (!backendUrl) {
         setStatus('Missing backend URL');
         return;
       }
-      await WebBrowser.openBrowserAsync(`${appUrl}/login`);
-      setStatus('Complete Google login in browser.');
+      const redirectUrl = Linking.createURL('auth-callback', {
+        scheme: 'solmailandroid',
+        isTripleSlashed: false,
+      });
+      const appUrl = backendUrl.replace(':8787', ':3000');
+      const authUrl = `${appUrl}/login?mobileRedirect=${encodeURIComponent(redirectUrl)}`;
+
+      const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUrl);
+
+      if (result.type === 'success') {
+        setStatus('Google auth complete. Opening inbox...');
+        router.replace('/inbox');
+      } else if (result.type === 'cancel' || result.type === 'dismiss') {
+        setStatus('Google login cancelled.');
+      } else {
+        // Fallback: keep prior browser-based flow if custom tab auth session fails.
+        await WebBrowser.openBrowserAsync(`${appUrl}/login`);
+        setStatus('Complete Google login in browser.');
+      }
     } catch (error) {
       setStatus(`Get started failed: ${normalizeError(error)}`);
     } finally {

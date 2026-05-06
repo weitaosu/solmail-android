@@ -1,4 +1,4 @@
-import { useLoaderData, useNavigate } from 'react-router';
+import { useLoaderData, useLocation, useNavigate } from 'react-router';
 
 import { MailLayout } from '@/components/mail/mail';
 import { useLabels } from '@/hooks/use-labels';
@@ -22,11 +22,21 @@ export async function clientLoader({ params, request }: Route.ClientLoaderArgs) 
 export default function MailPage() {
   const { folder } = useLoaderData<typeof clientLoader>();
   const navigate = useNavigate();
+  const location = useLocation();
   const [isLabelValid, setIsLabelValid] = useState<boolean | null>(true);
 
   const isStandardFolder = ALLOWED_FOLDERS.has(folder);
 
   const { userLabels, isLoading: isLoadingLabels } = useLabels();
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const mobileRedirect = params.get('mobileRedirect');
+
+    if (mobileRedirect?.startsWith('solmailandroid://')) {
+      window.location.replace(mobileRedirect);
+    }
+  }, [location.search]);
 
   useEffect(() => {
     if (isStandardFolder) {
