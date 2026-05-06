@@ -1,18 +1,25 @@
 import { useEffect } from 'react';
 import { useRouter } from 'expo-router';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import * as Linking from 'expo-linking';
+import { setAuthSession } from '@/src/auth/session-store';
 
 export default function AuthCallbackScreen() {
   const router = useRouter();
 
   useEffect(() => {
-    // Custom-tab OAuth returns to this route through deep-link callbackURL.
-    // For now we route directly to inbox after callback.
-    const timer = setTimeout(() => {
-      router.replace('/inbox');
-    }, 250);
+    const finishSignIn = async () => {
+      const initialUrl = await Linking.getInitialURL();
+      const parsed = initialUrl ? Linking.parse(initialUrl) : null;
+      const tokenParam =
+        typeof parsed?.queryParams?.token === 'string' ? parsed.queryParams.token : null;
+      const sessionValue = tokenParam || `oauth:${Date.now()}`;
 
-    return () => clearTimeout(timer);
+      await setAuthSession(sessionValue);
+      router.replace('/inbox');
+    };
+
+    void finishSignIn();
   }, [router]);
 
   return (

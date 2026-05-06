@@ -4,6 +4,7 @@ import { useMobileWallet } from '@/src/wallet/mobile-wallet-provider';
 import { useRouter } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
+import { getAuthSession } from '@/src/auth/session-store';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -13,6 +14,17 @@ export default function HomeScreen() {
   const [status, setStatus] = useState('Ready');
   const [busy, setBusy] = useState(false);
   const [backendStatus, setBackendStatus] = useState('Checking...');
+
+  useEffect(() => {
+    const restoreSession = async () => {
+      const authSession = await getAuthSession();
+      if (authSession) {
+        router.replace('/inbox');
+      }
+    };
+
+    void restoreSession();
+  }, [router]);
 
   useEffect(() => {
     const checkBackend = async () => {

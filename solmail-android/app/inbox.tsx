@@ -1,10 +1,17 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useMobileWallet } from '@/src/wallet/mobile-wallet-provider';
+import { clearAuthSession } from '@/src/auth/session-store';
 
 export default function InboxScreen() {
   const router = useRouter();
-  const { account } = useMobileWallet();
+  const { account, disconnect } = useMobileWallet();
+
+  const handleSignOut = async () => {
+    await clearAuthSession();
+    await disconnect();
+    router.replace('/');
+  };
 
   return (
     <View style={styles.container}>
@@ -13,8 +20,8 @@ export default function InboxScreen() {
       <Text style={styles.label}>Connected wallet:</Text>
       <Text style={styles.address}>{account?.publicKey.toBase58() || 'Not connected'}</Text>
       <Text style={styles.todo}>Next: wire tRPC mail list and thread screens.</Text>
-      <Pressable style={styles.button} onPress={() => router.replace('/')}>
-        <Text style={styles.buttonText}>Back to Login</Text>
+      <Pressable style={styles.button} onPress={handleSignOut}>
+        <Text style={styles.buttonText}>Sign Out</Text>
       </Pressable>
     </View>
   );
