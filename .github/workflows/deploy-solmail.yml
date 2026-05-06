@@ -1,0 +1,69 @@
+name: Deploy to Solmail.xyz
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-solmail
+  cancel-in-progress: true
+
+jobs:
+  deploy-backend:
+    name: Deploy Backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: Zero/pnpm-lock.yaml
+
+      - run: cd Zero && pnpm install --frozen-lockfile
+
+      - name: Deploy backend
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: Zero/apps/server
+          command: deploy --env production
+
+  deploy-frontend:
+    name: Deploy Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: Zero/pnpm-lock.yaml
+
+      - run: cd Zero && pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: Zero
+        run: pnpm build:frontend
+        env:
+          VITE_PUBLIC_BACKEND_URL: https://api.solmail.xyz
+          VITE_PUBLIC_APP_URL: https://solmail.xyz
+
+      - name: Deploy frontend
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: Zero/apps/mail
+          command: deploy --env production

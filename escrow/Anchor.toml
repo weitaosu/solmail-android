@@ -1,0 +1,17 @@
+[workspace]
+members = ["programs/solmail_escrow"]
+
+[programs.devnet]
+solmail_escrow = "DQgzwnMGkmgB5kC92ES28Kgw9gqfcpSnXgy8ogjjLuvd"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "anchor test"
+
+

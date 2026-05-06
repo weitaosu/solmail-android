@@ -1,0 +1,12 @@
+.cursor/
+.DS_Store
+
+# Rust/Anchor build artifacts
+target/
+**/target/
+**/sbpf-solana-solana/
+test-ledger/
+.anchor/test-ledger/
+
+# Node modules
+node_modules/
