@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useMobileWallet } from '@/src/wallet/mobile-wallet-provider';
 import { useRouter } from 'expo-router';
+import * as WebBrowser from 'expo-web-browser';
 
 export default function HomeScreen() {
-  const { account, connect, signIn, disconnect } = useMobileWallet();
+  const { account, signIn, disconnect } = useMobileWallet();
   const router = useRouter();
   const [status, setStatus] = useState('Ready');
   const [busy, setBusy] = useState(false);
@@ -27,25 +28,30 @@ export default function HomeScreen() {
     void checkBackend();
   }, []);
 
+  const handleGetStarted = async () => {
+    try {
+      setBusy(true);
+      setStatus('Opening Google login...');
+      const appUrl = process.env.EXPO_PUBLIC_BACKEND_URL?.replace(':8787', ':3000');
+      if (!appUrl) {
+        setStatus('Missing backend URL');
+        return;
+      }
+      await WebBrowser.openBrowserAsync(`${appUrl}/login`);
+      setStatus('Complete Google login in browser.');
+    } catch (error) {
+      setStatus(`Get started failed: ${normalizeError(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const normalizeError = (error: unknown) => {
     const message = error instanceof Error ? error.message : 'Unknown error';
     if (message.includes('Found no installed wallet')) {
       return 'No compatible wallet found. Install/setup a Solana wallet on this device.';
     }
     return message;
-  };
-
-  const handleConnect = async () => {
-    try {
-      setBusy(true);
-      setStatus('Connecting...');
-      await connect();
-      setStatus('Connected');
-    } catch (error) {
-      setStatus(`Connect failed: ${normalizeError(error)}`);
-    } finally {
-      setBusy(false);
-    }
   };
 
   const handleSignIn = async () => {
@@ -77,16 +83,17 @@ export default function HomeScreen() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Login to SolMail</Text>
-      <Text style={styles.subtitle}>Sign in with your installed wallet</Text>
+      <Text style={styles.subtitle}>Get started with your Google account</Text>
       <View style={styles.errorBox}>
         <Text style={styles.errorLabel}>Status</Text>
         <Text style={styles.errorText}>{status}</Text>
       </View>
       <Text style={styles.label}>Backend: {backendStatus}</Text>
       <Text style={styles.label}>Address: {account?.publicKey.toBase58() || 'Not connected'}</Text>
-      <Pressable disabled={busy} style={[styles.button, busy && styles.buttonDisabled]} onPress={handleConnect}>
-        <Text style={styles.buttonText}>{busy ? 'Please wait...' : 'Connect Wallet'}</Text>
+      <Pressable disabled={busy} style={[styles.button, busy && styles.buttonDisabled]} onPress={handleGetStarted}>
+        <Text style={styles.buttonText}>{busy ? 'Please wait...' : 'Get Started'}</Text>
       </Pressable>
+      <Text style={styles.helper}>After Google login, come back here to connect wallet.</Text>
       <Pressable disabled={busy} style={[styles.button, busy && styles.buttonDisabled]} onPress={handleSignIn}>
         <Text style={styles.buttonText}>{busy ? 'Please wait...' : 'Sign In (SIWS)'}</Text>
       </Pressable>
@@ -137,4 +144,5 @@ const styles = StyleSheet.create({
   },
   buttonDisabled: { opacity: 0.6 },
   buttonText: { color: '#fff', fontWeight: '700', fontSize: 18 },
+  helper: { color: '#bcbcbc', fontSize: 13 },
 });
