@@ -1,11 +1,31 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useMobileWallet } from '@/src/wallet/mobile-wallet-provider';
+import { useRouter } from 'expo-router';
 
 export default function HomeScreen() {
   const { account, connect, signIn, disconnect } = useMobileWallet();
+  const router = useRouter();
   const [status, setStatus] = useState('Ready');
   const [busy, setBusy] = useState(false);
+  const [backendStatus, setBackendStatus] = useState('Checking...');
+
+  useEffect(() => {
+    const checkBackend = async () => {
+      const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL;
+      if (!backendUrl) {
+        setBackendStatus('Missing EXPO_PUBLIC_BACKEND_URL');
+        return;
+      }
+      try {
+        const res = await fetch(`${backendUrl}/api/public/providers`);
+        setBackendStatus(res.ok ? 'Connected' : `Error ${res.status}`);
+      } catch {
+        setBackendStatus('Not reachable');
+      }
+    };
+    void checkBackend();
+  }, []);
 
   const normalizeError = (error: unknown) => {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -33,7 +53,7 @@ export default function HomeScreen() {
       setBusy(true);
       setStatus('Signing in...');
       await signIn();
-      setStatus('SIWS success');
+      setStatus('SIWS success. Continue to inbox.');
     } catch (error) {
       setStatus(`Sign-in failed: ${normalizeError(error)}`);
     } finally {
@@ -62,6 +82,7 @@ export default function HomeScreen() {
         <Text style={styles.errorLabel}>Status</Text>
         <Text style={styles.errorText}>{status}</Text>
       </View>
+      <Text style={styles.label}>Backend: {backendStatus}</Text>
       <Text style={styles.label}>Address: {account?.publicKey.toBase58() || 'Not connected'}</Text>
       <Pressable disabled={busy} style={[styles.button, busy && styles.buttonDisabled]} onPress={handleConnect}>
         <Text style={styles.buttonText}>{busy ? 'Please wait...' : 'Connect Wallet'}</Text>
@@ -72,6 +93,11 @@ export default function HomeScreen() {
       <Pressable disabled={busy} style={[styles.buttonSecondary, busy && styles.buttonDisabled]} onPress={handleDisconnect}>
         <Text style={styles.buttonText}>Disconnect</Text>
       </Pressable>
+      {account && (
+        <Pressable style={styles.button} onPress={() => router.push('/inbox')}>
+          <Text style={styles.buttonText}>Continue to Inbox</Text>
+        </Pressable>
+      )}
     </View>
   );
 }
