@@ -57,14 +57,10 @@ export default function ReplyCompose({ messageId }: ReplyComposeProps) {
 
   // Email scoring modal state
   const [scoringModalOpen, setScoringModalOpen] = useState(false);
-  const [scoringRequestId, setScoringRequestId] = useState<string | null>(null);
   const [scoringProgress, setScoringProgress] = useState<
-    'reading_input' | 'calculating_score' | 'creating_recommendations' | 'completed'
+    'reading_input' | 'calculating_score' | 'completed'
   >('reading_input');
-  const [scoringResult, setScoringResult] = useState<{
-    score: number;
-    recommendations: string[];
-  } | null>(null);
+  const [scoringPass, setScoringPass] = useState<boolean | null>(null);
   const progressPollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const { data: settings, isLoading: settingsLoading } = useSettings();
   const { data: session } = useSession();
@@ -245,140 +241,68 @@ export default function ReplyCompose({ messageId }: ReplyComposeProps) {
       }
 
       // Score the email reply BEFORE escrow release
-      // This ensures we validate the reply quality before releasing escrow
-      let emailScore: number | undefined;
-      let escrowDecision: 'RELEASE' | 'WITHHOLD' | undefined;
-
+      // Run a quick quality check for advisory UI feedback. The send proceeds
+      // either way — the authoritative escrow decision is made server-side by
+      // the async escrow agent after send.
       if (isReplyMode) {
         try {
-          console.log('[EMAIL SCORING] Starting email scoring before escrow release:');
-
-          // Get all thread emails for context
           const messagesToScore = freshEmailData?.messages || emailData?.messages || [];
           const threadEmails = messagesToScore.map((msg: any) => ({
             decodedBody: msg.decodedBody || '',
             subject: msg.subject || '',
           }));
 
-          // Generate request ID for progress tracking
           const requestId = `score-${Date.now()}-${Math.random().toString(36).substring(7)}`;
-          setScoringRequestId(requestId);
           setScoringProgress('reading_input');
-          setScoringResult(null);
+          setScoringPass(null);
           setScoringModalOpen(true);
 
-          // Start progress polling
           const pollProgress = async () => {
-            if (!requestId) return;
-
             try {
               const progress = await queryClient.fetchQuery(
                 trpc.mail.scoreEmailProgress.queryOptions({ requestId }),
               );
-
               if (progress.step && progress.step !== 'completed') {
                 setScoringProgress(progress.step as typeof scoringProgress);
               }
-
-              if (progress.completed && progress.result) {
-                setScoringProgress('completed');
-                setScoringResult({
-                  score: progress.result.score,
-                  recommendations: progress.result.recommendations || [],
-                });
-
-                // Stop polling
-                if (progressPollIntervalRef.current) {
-                  clearInterval(progressPollIntervalRef.current);
-                  progressPollIntervalRef.current = null;
-                }
-              } else if (progress.completed && progress.error) {
-                // Error occurred
-                setScoringModalOpen(false);
-                toast.error(`Failed to score email: ${progress.error}`, {
-                  id: 'email-scoring-error',
-                  duration: 10000,
-                });
-                throw new Error(`Email scoring failed: ${progress.error}`);
+              if (progress.completed && progressPollIntervalRef.current) {
+                clearInterval(progressPollIntervalRef.current);
+                progressPollIntervalRef.current = null;
               }
             } catch (error) {
               console.error('[EMAIL SCORING] Error polling progress:', error);
             }
           };
 
-          // Poll every 300ms
           progressPollIntervalRef.current = setInterval(pollProgress, 300);
-          pollProgress(); // Initial poll
+          pollProgress();
 
-          // Call scoring function with reply content and thread context
-          const scoringResult = await scoreEmail({
+          const result = await scoreEmail({
             replyContent: data.message,
             threadEmails: threadEmails.length > 0 ? threadEmails : undefined,
             requestId,
           });
 
-          // Stop polling
           if (progressPollIntervalRef.current) {
             clearInterval(progressPollIntervalRef.current);
             progressPollIntervalRef.current = null;
           }
 
-          emailScore = scoringResult.score;
-          escrowDecision = scoringResult.decision as 'RELEASE' | 'WITHHOLD';
-
-          // Update modal with final result
           setScoringProgress('completed');
-          setScoringResult({
-            score: scoringResult.score,
-            recommendations: scoringResult.recommendations || [],
-          });
-
-          // If decision is WITHHOLD, block escrow release and email sending
-          if (escrowDecision === 'WITHHOLD') {
-            console.log('[EMAIL SCORING] ❌ Email score too low - blocking escrow release:', {
-              score: emailScore,
-              threshold: 70,
-              decision: escrowDecision,
-            });
-            // Modal will show recommendations - don't throw error here, let modal show
-            // Return early to prevent email send, but keep modal open
-            return;
-          }
-
+          setScoringPass(result.pass);
           console.log(
-            '[EMAIL SCORING] ✅ Email score meets threshold - proceeding with escrow release:',
-            {
-              score: emailScore,
-              decision: escrowDecision,
-            },
+            `[EMAIL SCORING] ${result.pass ? 'PASS' : 'FAIL'} — score=${result.score}/100 (threshold 15)`,
           );
         } catch (error) {
-          // Stop polling if still active
           if (progressPollIntervalRef.current) {
             clearInterval(progressPollIntervalRef.current);
             progressPollIntervalRef.current = null;
           }
-
-          // If scoring fails, we should block escrow release for safety
-          console.error('[EMAIL SCORING] Error scoring email:', error);
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-
-          // If it's our intentional block (WITHHOLD), keep modal open to show recommendations
-          if (errorMessage.includes('below the threshold')) {
-            // Modal is already showing recommendations - just return to prevent email send
-            return;
-          }
-
-          // For other errors, close modal and show error
+          // Quality check is advisory — failures don't block the send. The
+          // server will still run its own authoritative scoring before
+          // releasing or withholding escrow.
+          console.error('[EMAIL SCORING] Quality check failed (non-blocking):', error);
           setScoringModalOpen(false);
-          toast.error(
-            `Failed to score email: ${errorMessage}. Escrow release blocked for safety.`,
-            {
-              id: 'email-scoring-error',
-              duration: 10000,
-            },
-          );
-          throw new Error(`Email scoring failed: ${errorMessage}. Escrow release blocked.`);
         }
       }
 
@@ -782,29 +706,24 @@ export default function ReplyCompose({ messageId }: ReplyComposeProps) {
           );
         }
 
-        // If wallet is connected and there's an escrow, try to claim it
-        // CRITICAL: This must complete BEFORE sending the email to ensure settlement happens
-        // Also ensure email scoring passed (decision must be RELEASE)
-        if (hasEscrowToClaim && wallet && publicKey && connection && wallet.adapter) {
-          // Safety check: Only proceed if email scoring passed (decision is RELEASE)
-          if (escrowDecision !== 'RELEASE') {
-            console.log(
-              '[ESCROW LOG] ❌ Escrow release blocked - email scoring decision is not RELEASE:',
-              {
-                decision: escrowDecision,
-                score: emailScore,
-              },
-            );
-            toast.error(
-              `Email quality score (${emailScore || 'N/A'}/100) does not meet threshold.`,
-              {
-                duration: 10000,
-              },
-            );
-            //TODO: should this be throwing here?
-            throw new Error('Escrow release blocked: Email scoring decision is not RELEASE');
-          }
+        if (hasEscrowToClaim && scoringPass !== true) {
+          console.log(
+            '[ESCROW LOG] Quality check did not pass — skipping client claim; server will refund sender.',
+          );
+        }
 
+        // If wallet is connected and there's an escrow, try to claim it.
+        // CRITICAL: this runs before send so the receiver claims pending funds
+        // when the reply passes. On fail we skip the claim entirely — the
+        // server's async escrow agent will WITHHOLD funds back to the sender.
+        if (
+          hasEscrowToClaim &&
+          scoringPass === true &&
+          wallet &&
+          publicKey &&
+          connection &&
+          wallet.adapter
+        ) {
           let claimSuccessful = false;
 
           // CRITICAL: Verify we have all required data
@@ -1410,11 +1329,8 @@ export default function ReplyCompose({ messageId }: ReplyComposeProps) {
     return [];
   };
 
-  // Handle modal close - if score was below threshold, we've already blocked email send
   const handleModalClose = (open: boolean) => {
     setScoringModalOpen(open);
-    // If closing and we have a result with score < 70, the email send was already blocked
-    // No need to do anything else here
   };
 
   // Cleanup polling on unmount
@@ -1434,9 +1350,7 @@ export default function ReplyCompose({ messageId }: ReplyComposeProps) {
         open={scoringModalOpen}
         onOpenChange={handleModalClose}
         progressStep={scoringProgress}
-        score={scoringResult?.score}
-        recommendations={scoringResult?.recommendations}
-        onOk={() => handleModalClose(false)}
+        pass={scoringPass ?? undefined}
       />
       <div className="w-full overflow-visible rounded-2xl border">
         <EmailComposer
