@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
@@ -14,6 +14,8 @@ export default function HomeScreen() {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL;
+  const logoUri = backendUrl ? `${backendUrl.replace(':8787', ':3000')}/solmail-logo.png` : null;
 
   useEffect(() => {
     const restoreSession = async () => {
@@ -37,7 +39,6 @@ export default function HomeScreen() {
     try {
       setBusy(true);
       setError(null);
-      const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL;
       if (!backendUrl) {
         setError('Missing backend URL configuration.');
         return;
@@ -81,10 +82,14 @@ export default function HomeScreen() {
     <SafeAreaView style={styles.shell} edges={['top', 'bottom']}>
       <View style={styles.hero}>
         <View style={styles.logoCircle}>
-          <Feather name="mail" size={42} color="#fff" />
+          <Image
+            source={logoUri ? { uri: logoUri } : require('@/assets/images/icon.png')}
+            defaultSource={require('@/assets/images/icon.png')}
+            style={styles.logoImage}
+          />
         </View>
         <Text style={styles.title}>SolMail</Text>
-        <Text style={styles.tagline}>An incentivized inbox for richer replies.</Text>
+        <Text style={styles.tagline}>Micropayments for cold emailing that incentivize meaningful responses.</Text>
       </View>
 
       <View style={styles.actions}>
@@ -97,10 +102,10 @@ export default function HomeScreen() {
           onPress={handleGetStarted}
         >
           {busy ? (
-            <ActivityIndicator size="small" color="#fff" />
+            <ActivityIndicator size="small" color={palette.surface} />
           ) : (
             <>
-              <Feather name="log-in" size={18} color="#fff" />
+              <Feather name="log-in" size={18} color={palette.surface} />
               <Text style={styles.primaryButtonText}>Continue with Google</Text>
             </>
           )}
@@ -112,10 +117,6 @@ export default function HomeScreen() {
             <Text style={styles.errorText}>{error}</Text>
           </View>
         )}
-
-        <Text style={styles.helper}>
-          Your Solana wallet is requested only when sending mail.
-        </Text>
       </View>
     </SafeAreaView>
   );
@@ -136,15 +137,14 @@ const styles = StyleSheet.create({
     width: 84,
     height: 84,
     borderRadius: 42,
-    backgroundColor: palette.accent,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 24,
-    shadowColor: palette.accent,
-    shadowOpacity: 0.5,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 6,
+  },
+  logoImage: {
+    width: 56,
+    height: 56,
+    borderRadius: 14,
   },
   title: {
     color: palette.textPrimary,
@@ -165,16 +165,18 @@ const styles = StyleSheet.create({
     marginBottom: 24,
   },
   primaryButton: {
-    backgroundColor: palette.accent,
+    backgroundColor: '#fff',
     height: 52,
     borderRadius: 14,
+    borderWidth: 1,
+    borderColor: palette.border,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 10,
   },
   primaryButtonPressed: { opacity: 0.85 },
-  primaryButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  primaryButtonText: { color: palette.surface, fontSize: 16, fontWeight: '600' },
   helper: {
     color: palette.textFaint,
     fontSize: 12,
