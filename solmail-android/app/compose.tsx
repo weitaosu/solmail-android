@@ -142,6 +142,75 @@ function buildReplyAllRecipients(
   return { to, cc, bcc };
 }
 
+function getHeaderInsensitive(headers: Record<string, string> | undefined, canonical: string) {
+  if (!headers) return undefined;
+  const want = canonical.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === want && typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return undefined;
+}
+
+/** First message in the thread that carries SolMail escrow headers (for reply settlement). */
+function findSolmailEscrowHeaders(
+  messages: unknown[],
+): { threadIdHex: string; senderPubkey: string } | null {
+  for (const msg of messages) {
+    const h = (msg as { headers?: Record<string, string> }).headers;
+    const tid = getHeaderInsensitive(h, 'X-Solmail-Thread-Id');
+    const spk = getHeaderInsensitive(h, 'X-Solmail-Sender-Pubkey');
+    if (!tid || !spk) continue;
+    const hex = tid.replace(/^0x/i, '').trim();
+    if (!/^[0-9a-fA-F]{64}$/.test(hex)) continue;
+    try {
+      new PublicKey(spk.trim());
+    } catch {
+      continue;
+    }
+    return { threadIdHex: hex.toLowerCase(), senderPubkey: spk.trim() };
+  }
+  return null;
+}
+
+function threadIdHexToBytes(hex: string): Uint8Array | null {
+  const clean = hex.trim().toLowerCase().replace(/^0x/, '');
+  if (!/^[0-9a-f]{64}$/.test(clean)) return null;
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+/** Escrow account data: 8 disc + Escrow; status enum at byte index 128. */
+const ESCROW_MIN_DATA_LEN = 130;
+const ESCROW_STATUS_PENDING = 0;
+
+/** Anchor `register_and_claim` discriminator (sha256("global:register_and_claim")[0:8]). */
+const REGISTER_AND_CLAIM_DISCRIMINATOR = Uint8Array.from([127, 144, 210, 98, 66, 165, 255, 139]);
+
+async function isEscrowPdaPending(
+  meta: { threadIdHex: string; senderPubkey: string },
+  programId: PublicKey,
+  rpc: string,
+): Promise<boolean> {
+  const threadBytes = threadIdHexToBytes(meta.threadIdHex);
+  if (!threadBytes) return false;
+  try {
+    const senderPk = new PublicKey(meta.senderPubkey);
+    const connection = new Connection(rpc, 'confirmed');
+    const [escrowPda] = PublicKey.findProgramAddressSync(
+      [new TextEncoder().encode('escrow'), senderPk.toBuffer(), threadBytes],
+      programId,
+    );
+    const info = await connection.getAccountInfo(escrowPda, 'confirmed');
+    if (!info?.owner.equals(programId) || info.data.length < ESCROW_MIN_DATA_LEN) return false;
+    return info.data[128] === ESCROW_STATUS_PENDING;
+  } catch {
+    return false;
+  }
+}
+
 export default function ComposeScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ replyThread?: string }>();
@@ -171,8 +240,19 @@ export default function ComposeScreen() {
   );
   const INIT_ESCROW_DISCRIMINATOR = Uint8Array.from([243, 160, 77, 153, 11, 92, 48, 209]);
 
+  const [replyEscrowHeaders, setReplyEscrowHeaders] = useState<{
+    threadIdHex: string;
+    senderPubkey: string;
+  } | null>(null);
+  /** null = still checking RPC when headers exist */
+  const [replyEscrowPending, setReplyEscrowPending] = useState<boolean | null>(false);
+
   useEffect(() => {
-    if (!replyThreadId) return;
+    if (!replyThreadId) {
+      setReplyEscrowHeaders(null);
+      setReplyEscrowPending(false);
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {
@@ -185,6 +265,15 @@ export default function ComposeScreen() {
         if (cancelled || !connection?.email) return;
 
         const messages = thread.messages ?? [];
+        const escrowMeta = findSolmailEscrowHeaders(messages);
+        setReplyEscrowHeaders(escrowMeta);
+        if (!escrowMeta) {
+          setReplyEscrowPending(false);
+        } else {
+          setReplyEscrowPending(null);
+          const pending = await isEscrowPdaPending(escrowMeta, escrowProgramId, rpcUrl);
+          if (!cancelled) setReplyEscrowPending(pending);
+        }
         const descSorted = [...messages].sort((a, b) => {
           const da = new Date((a as { receivedOn?: string }).receivedOn || 0).getTime();
           const db = new Date((b as { receivedOn?: string }).receivedOn || 0).getTime();
@@ -220,6 +309,67 @@ export default function ComposeScreen() {
       cancelled = true;
     };
   }, [replyThreadId]);
+
+  /**
+   * If SolMail headers exist and the escrow PDA is still pending, connect wallet and
+   * sign `register_and_claim`. No-op if already claimed or account missing.
+   */
+  const claimReplyEscrowIfPending = async () => {
+    if (!replyEscrowHeaders) return;
+    const threadBytes = threadIdHexToBytes(replyEscrowHeaders.threadIdHex);
+    if (!threadBytes) {
+      throw new Error('Invalid X-Solmail-Thread-Id from thread headers.');
+    }
+    const senderPk = new PublicKey(replyEscrowHeaders.senderPubkey);
+    const connection = new Connection(rpcUrl, 'confirmed');
+    const [escrowPda] = PublicKey.findProgramAddressSync(
+      [new TextEncoder().encode('escrow'), senderPk.toBuffer(), threadBytes],
+      escrowProgramId,
+    );
+    const info = await connection.getAccountInfo(escrowPda, 'confirmed');
+    if (!info || !info.owner.equals(escrowProgramId)) {
+      return;
+    }
+    if (info.data.length < ESCROW_MIN_DATA_LEN) {
+      throw new Error('Escrow account data is invalid.');
+    }
+    if (info.data[128] !== ESCROW_STATUS_PENDING) {
+      return;
+    }
+
+    const receiver = (await ensureWalletWithSol()).publicKey;
+
+    const data = new Uint8Array(8 + 32 + 32);
+    data.set(REGISTER_AND_CLAIM_DISCRIMINATOR, 0);
+    data.set(senderPk.toBuffer(), 8);
+    data.set(threadBytes, 8 + 32);
+
+    const ix = new TransactionInstruction({
+      programId: escrowProgramId,
+      keys: [
+        { pubkey: receiver, isSigner: true, isWritable: true },
+        { pubkey: escrowPda, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+
+    const tx = new Transaction().add(ix);
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = receiver;
+
+    const signatures = await signAndSendTransactions([tx]);
+    const signature = signatures[0];
+    if (!signature) {
+      throw new Error('No claim transaction signature returned by wallet.');
+    }
+
+    await connection.confirmTransaction(
+      { signature, blockhash, lastValidBlockHeight },
+      'confirmed',
+    );
+  };
 
   const ensureWalletWithSol = async () => {
     const activeAccount = account || (await connect());
@@ -309,6 +459,7 @@ export default function ComposeScreen() {
       }
 
       if (isReply) {
+        await claimReplyEscrowIfPending();
         await trpc.mail.send.mutate({
           to: recipients,
           cc: ccRecipients.length ? ccRecipients : undefined,
@@ -351,7 +502,14 @@ export default function ComposeScreen() {
           <Text style={styles.headerAction}>Cancel</Text>
         </Pressable>
         <Text style={styles.title}>{replyThreadId ? 'Reply all' : 'New email'}</Text>
-        <Pressable onPress={handleSend} disabled={sending || replyPrefilling}>
+        <Pressable
+          onPress={handleSend}
+          disabled={
+            sending ||
+            replyPrefilling ||
+            (isReply && !!replyEscrowHeaders && replyEscrowPending === null)
+          }
+        >
           {sending ? <ActivityIndicator size="small" color="#ffffff" /> : <Text style={styles.headerAction}>Send</Text>}
         </Pressable>
       </View>
@@ -364,10 +522,33 @@ export default function ComposeScreen() {
           </View>
         )}
         {isReply ? (
-          <Text style={styles.replyNote}>
-            Replies do not create a new on-chain escrow; only new outgoing mail requires a wallet
-            signature and devnet SOL.
-          </Text>
+          <>
+            <Text style={styles.replyNote}>
+              {!replyEscrowHeaders
+                ? 'No escrow headers on this thread — reply sends without signing. Only new mail creates escrow.'
+                : replyEscrowPending === null
+                  ? 'Checking whether on-chain escrow is still pending…'
+                  : replyEscrowPending
+                    ? 'Pending SolMail escrow on devnet — connect your wallet. Send will sign register_and_claim, then post the reply.'
+                    : 'Escrow for this thread is already settled (or missing on-chain). Reply sends without a wallet signature.'}
+            </Text>
+            {!!replyEscrowHeaders && replyEscrowPending === true && (
+              <>
+                <View style={styles.walletRow}>
+                  <Text style={styles.walletText}>
+                    Wallet:{' '}
+                    {account
+                      ? `${account.publicKey.toBase58().slice(0, 4)}...${account.publicKey.toBase58().slice(-4)}`
+                      : 'Not connected'}
+                  </Text>
+                  <Pressable style={styles.walletButton} onPress={() => void connect()}>
+                    <Text style={styles.walletButtonText}>{account ? 'Reconnect' : 'Connect'}</Text>
+                  </Pressable>
+                </View>
+                {!!balanceLabel && <Text style={styles.balance}>{balanceLabel}</Text>}
+              </>
+            )}
+          </>
         ) : (
           <>
             <View style={styles.walletRow}>
