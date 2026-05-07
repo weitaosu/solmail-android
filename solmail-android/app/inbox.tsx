@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   AppState,
   Dimensions,
   FlatList,
+  Modal,
   Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  TouchableWithoutFeedback,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -43,6 +46,20 @@ type MailFolder = (typeof FOLDER)[keyof typeof FOLDER];
 const LABEL_ONLY_FOLDERS: Record<string, string[]> = {
   [FOLDER.STARRED]: ['STARRED'],
 };
+
+/**
+ * Web-style category filters — Gmail-only. Match the dropdown in
+ * Zero/apps/mail/components/mail/mail.tsx (CategoryDropdown).
+ */
+type CategoryKey = 'important' | 'all' | 'personal' | 'updates' | 'promotions' | 'unread';
+const CATEGORIES: { key: CategoryKey; label: string; labelIds: string[]; tint: string }[] = [
+  { key: 'all', label: 'All Mail', labelIds: [], tint: '#006FFE' },
+  { key: 'important', label: 'Important', labelIds: ['IMPORTANT'], tint: '#F59E0D' },
+  { key: 'personal', label: 'Personal', labelIds: ['CATEGORY_PERSONAL'], tint: '#39AE4A' },
+  { key: 'updates', label: 'Updates', labelIds: ['CATEGORY_UPDATES'], tint: '#8B5CF6' },
+  { key: 'promotions', label: 'Promotions', labelIds: ['CATEGORY_PROMOTIONS'], tint: '#F43F5E' },
+  { key: 'unread', label: 'Unread', labelIds: ['UNREAD'], tint: '#FF4800' },
+];
 
 type ThreadPreview = {
   id: string;
@@ -112,6 +129,12 @@ export default function InboxScreen() {
     picture: string | null;
   } | null>(null);
   const [userLabels, setUserLabels] = useState<{ id: string; name: string }[]>([]);
+  const [categoryKey, setCategoryKey] = useState<CategoryKey>('all');
+  const [categoryMenuOpen, setCategoryMenuOpen] = useState(false);
+  const progressOpacity = useRef(new Animated.Value(0)).current;
+
+  const isGmail = (connection?.email || '').toLowerCase().endsWith('@gmail.com');
+  const activeCategory = CATEGORIES.find((c) => c.key === categoryKey) ?? CATEGORIES[0]!;
 
   const walletAddress = useMemo(() => account?.publicKey.toBase58() || '', [account]);
   const countMap = useMemo(() => statsByLabel(stats), [stats]);
@@ -168,11 +191,16 @@ export default function InboxScreen() {
     setUserLabels(ordered.slice(0, 6));
   }, []);
 
-  const loadThreads = useCallback(async (folder: MailFolder, opts?: { silent?: boolean }) => {
+  const loadThreads = useCallback(
+    async (
+      folder: MailFolder,
+      opts?: { silent?: boolean; categoryLabelIds?: string[] },
+    ) => {
     try {
       if (!opts?.silent) setLoading(true);
       setError(null);
       const labelOnlyIds = LABEL_ONLY_FOLDERS[folder];
+      const extra = opts?.categoryLabelIds ?? [];
       const queryArgs = labelOnlyIds
         ? {
             // Label-only views (e.g. Starred) span every folder.
@@ -180,9 +208,15 @@ export default function InboxScreen() {
             maxResults: 35,
             cursor: '',
             q: '',
-            labelIds: labelOnlyIds,
+            labelIds: [...labelOnlyIds, ...extra],
           }
-        : { folder, maxResults: 35, cursor: '', q: '', labelIds: [] as string[] };
+        : {
+            folder,
+            maxResults: 35,
+            cursor: '',
+            q: '',
+            labelIds: extra,
+          };
       const response = await trpc.mail.listThreads.query(queryArgs);
       const rawThreads = Array.isArray(response?.threads) ? response.threads : [];
       const details = await Promise.all(
@@ -249,8 +283,8 @@ export default function InboxScreen() {
   }, [loadSidebarData]);
 
   useEffect(() => {
-    void loadThreads(activeFolder);
-  }, [activeFolder, loadThreads]);
+    void loadThreads(activeFolder, { categoryLabelIds: activeCategory.labelIds });
+  }, [activeFolder, categoryKey, loadThreads]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Refetch every time the inbox regains focus so archive/trash/send actions
@@ -261,8 +295,9 @@ export default function InboxScreen() {
   useFocusEffect(
     useCallback(() => {
       void loadSidebarData();
-      void loadThreads(activeFolder, { silent: true });
-    }, [activeFolder, loadSidebarData, loadThreads]),
+      void loadThreads(activeFolder, { silent: true, categoryLabelIds: activeCategory.labelIds });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeFolder, categoryKey, loadSidebarData, loadThreads]),
   );
 
   /**
@@ -292,8 +327,9 @@ export default function InboxScreen() {
       });
       setThreads((prev) => prev.filter((t) => t.id !== removedIdParam));
     }
-    void loadThreads(activeFolder, { silent: true });
+    void loadThreads(activeFolder, { silent: true, categoryLabelIds: activeCategory.labelIds });
     void loadSidebarData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshMarker, removedIdParam, activeFolder, loadThreads, loadSidebarData]);
 
   /**
@@ -322,20 +358,33 @@ export default function InboxScreen() {
     const POLL_MS = 60_000;
     const id = setInterval(() => {
       if (!pollFocusedRef.current || !pollAppActiveRef.current) return;
-      void loadThreads(activeFolder, { silent: true });
+      void loadThreads(activeFolder, { silent: true, categoryLabelIds: activeCategory.labelIds });
       void loadSidebarData();
     }, POLL_MS);
     return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeFolder, loadThreads, loadSidebarData]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await Promise.all([loadSidebarData(), loadThreads(activeFolder, { silent: true })]);
+      await Promise.all([
+        loadSidebarData(),
+        loadThreads(activeFolder, { silent: true, categoryLabelIds: activeCategory.labelIds }),
+      ]);
     } finally {
       setRefreshing(false);
     }
-  }, [activeFolder, loadSidebarData, loadThreads]);
+  }, [activeFolder, loadSidebarData, loadThreads]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Mirror web's progress bar: fade in while a fetch is active, fade out when idle.
+  useEffect(() => {
+    Animated.timing(progressOpacity, {
+      toValue: loading || refreshing ? 1 : 0,
+      duration: 220,
+      useNativeDriver: true,
+    }).start();
+  }, [loading, refreshing, progressOpacity]);
 
   const handleSignOut = async () => {
     await clearAuthSession();
@@ -393,30 +442,61 @@ export default function InboxScreen() {
   return (
     <SafeAreaView style={styles.shell} edges={['top']}>
       <View style={styles.viewport}>
-        <View style={styles.searchBar}>
+        <View style={styles.topBar}>
           <Pressable
             hitSlop={10}
-            style={styles.searchIcon}
+            style={styles.drawerToggle}
             onPress={() => setDrawerOpen(true)}
           >
             <Feather name="menu" size={20} color={palette.textSecondary} />
           </Pressable>
-          <TextInput
-            placeholder={query ? '' : `Search in ${folderTitle.toLowerCase()}`}
-            placeholderTextColor={palette.textFaint}
-            value={query}
-            onChangeText={setQuery}
-            style={styles.searchInput}
-            returnKeyType="search"
-          />
-          <Pressable hitSlop={10} style={styles.searchIcon}>
-            <Avatar
-              seed={displayEmail || displayName}
-              size={28}
-              imageUri={connection?.picture}
+
+          <View style={styles.searchPill}>
+            <Feather name="search" size={14} color={palette.textFaint} />
+            <TextInput
+              placeholder="Search"
+              placeholderTextColor={palette.textFaint}
+              value={query}
+              onChangeText={setQuery}
+              style={styles.searchInput}
+              returnKeyType="search"
             />
+            {!!query && (
+              <Pressable hitSlop={6} onPress={() => setQuery('')} style={styles.clearBtn}>
+                <Text style={styles.clearText}>Clear</Text>
+              </Pressable>
+            )}
+          </View>
+
+          {isGmail && activeFolder === FOLDER.INBOX && (
+            <Pressable
+              style={styles.iconBtn}
+              hitSlop={6}
+              onPress={() => setCategoryMenuOpen(true)}
+            >
+              <Feather
+                name="filter"
+                size={16}
+                color={categoryKey === 'all' ? palette.textFaint : activeCategory.tint}
+              />
+            </Pressable>
+          )}
+
+          <Pressable
+            style={styles.iconBtn}
+            hitSlop={6}
+            onPress={() => void handleRefresh()}
+          >
+            <Feather name="refresh-cw" size={16} color={palette.textFaint} />
           </Pressable>
         </View>
+
+        <Animated.View
+          style={[
+            styles.progressBar,
+            { backgroundColor: activeCategory.tint, opacity: progressOpacity },
+          ]}
+        />
 
         {activeFolder !== FOLDER.INBOX && (
           <View style={styles.folderStrip}>
@@ -425,6 +505,42 @@ export default function InboxScreen() {
         )}
 
         {error && <Text style={styles.error}>{error}</Text>}
+
+        {/* Category dropdown — web's CategoryDropdown ported to a Modal popover. */}
+        <Modal
+          visible={categoryMenuOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setCategoryMenuOpen(false)}
+        >
+          <TouchableWithoutFeedback onPress={() => setCategoryMenuOpen(false)}>
+            <View style={styles.menuBackdrop}>
+              <TouchableWithoutFeedback>
+                <View style={styles.menuPopover}>
+                  {CATEGORIES.map((cat) => (
+                    <Pressable
+                      key={cat.key}
+                      onPress={() => {
+                        setCategoryKey(cat.key);
+                        setCategoryMenuOpen(false);
+                      }}
+                      style={({ pressed }) => [
+                        styles.menuItem,
+                        pressed && styles.menuItemPressed,
+                      ]}
+                    >
+                      <View style={[styles.menuDot, { backgroundColor: cat.tint }]} />
+                      <Text style={styles.menuItemText}>{cat.label}</Text>
+                      {categoryKey === cat.key && (
+                        <Feather name="check" size={14} color={palette.accentSoft} />
+                      )}
+                    </Pressable>
+                  ))}
+                </View>
+              </TouchableWithoutFeedback>
+            </View>
+          </TouchableWithoutFeedback>
+        </Modal>
 
         <FlatList
           data={visibleThreads}
@@ -446,10 +562,16 @@ export default function InboxScreen() {
               style={({ pressed }) => [
                 styles.threadRow,
                 pressed && styles.threadRowPressed,
+                !item.isUnread && styles.threadRowRead,
               ]}
               onPress={() => router.push(`/thread/${item.id}`)}
             >
-              <Avatar seed={item.fromEmail || item.from} size={40} />
+              {item.isUnread ? (
+                <View style={styles.unreadDot} />
+              ) : (
+                <View style={styles.unreadDotPlaceholder} />
+              )}
+              <Avatar seed={item.fromEmail || item.from} size={32} />
               <View style={styles.threadMain}>
                 <View style={styles.rowTop}>
                   <Text
@@ -458,11 +580,7 @@ export default function InboxScreen() {
                   >
                     {item.from}
                   </Text>
-                  <Text
-                    style={[styles.threadTime, item.isUnread && styles.threadTimeUnread]}
-                  >
-                    {formatCompactTime(item.dateIso)}
-                  </Text>
+                  <Text style={styles.threadTime}>{formatCompactTime(item.dateIso)}</Text>
                 </View>
                 <Text
                   style={[styles.threadSubject, item.isUnread && styles.threadSubjectUnread]}
@@ -470,11 +588,12 @@ export default function InboxScreen() {
                 >
                   {item.subject}
                 </Text>
-                <Text style={styles.threadSnippet} numberOfLines={1}>
-                  {item.snippet}
-                </Text>
+                {!!item.snippet && (
+                  <Text style={styles.threadSnippet} numberOfLines={2}>
+                    {item.snippet}
+                  </Text>
+                )}
               </View>
-              {item.isUnread && <View style={styles.unreadDot} />}
             </Pressable>
           )}
           ListEmptyComponent={
@@ -485,8 +604,15 @@ export default function InboxScreen() {
             ) : emptyState ? (
               <View style={styles.emptyWrap}>
                 <Feather name="inbox" size={48} color={palette.textFaint} />
-                <Text style={styles.emptyTitle}>No conversations</Text>
-                <Text style={styles.emptyHint}>You&apos;re all caught up.</Text>
+                <Text style={styles.emptyTitle}>It&apos;s empty here</Text>
+                <Text style={styles.emptyHint}>
+                  {query ? 'Search for another email' : 'You\'re all caught up.'}
+                </Text>
+                {!!query && (
+                  <Pressable hitSlop={6} onPress={() => setQuery('')}>
+                    <Text style={styles.emptyClear}>Clear filters</Text>
+                  </Pressable>
+                )}
               </View>
             ) : null
           }
@@ -679,29 +805,49 @@ function DrawerNavRow({
 const styles = StyleSheet.create({
   shell: { flex: 1, backgroundColor: palette.surface },
   viewport: { flex: 1, width: '100%' },
-  searchBar: {
-    margin: 8,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: palette.surfaceElevated,
-    paddingHorizontal: 4,
+  topBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingTop: 8,
+    paddingBottom: 6,
   },
-  searchIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+  drawerToggle: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  searchPill: {
+    flex: 1,
+    height: 36,
+    borderRadius: 8,
+    backgroundColor: palette.surface,
+    borderWidth: 1,
+    borderColor: palette.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    gap: 6,
   },
   searchInput: {
     flex: 1,
     color: palette.textPrimary,
-    fontSize: 15,
+    fontSize: 13,
     paddingVertical: 0,
   },
+  clearBtn: { paddingHorizontal: 4, paddingVertical: 2 },
+  clearText: { color: palette.textFaint, fontSize: 11 },
+  iconBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  progressBar: { height: 2, width: '100%' },
   folderStrip: {
     paddingHorizontal: 16,
     paddingTop: 4,
@@ -714,15 +860,19 @@ const styles = StyleSheet.create({
     letterSpacing: 0.6,
     textTransform: 'uppercase',
   },
-  listContent: { paddingBottom: 96 },
+  listContent: { paddingBottom: 96, paddingTop: 4 },
   listEmpty: { flexGrow: 1, justifyContent: 'center' },
   threadRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    paddingHorizontal: 12,
+    marginHorizontal: 4,
+    marginVertical: 2,
+    paddingHorizontal: 8,
     paddingVertical: 10,
-    gap: 12,
+    borderRadius: 8,
+    gap: 10,
   },
+  threadRowRead: { opacity: 0.6 },
   threadRowPressed: { backgroundColor: palette.surfaceMuted },
   threadMain: { flex: 1, minWidth: 0 },
   rowTop: {
@@ -734,29 +884,35 @@ const styles = StyleSheet.create({
   threadFrom: {
     color: palette.textSecondary,
     fontSize: 14,
+    fontWeight: '500',
     flex: 1,
     marginRight: 8,
   },
   threadFromUnread: { color: palette.textPrimary, fontWeight: '700' },
   threadTime: { color: palette.textMuted, fontSize: 12 },
-  threadTimeUnread: { color: palette.accentSoft, fontWeight: '600' },
   threadSubject: {
-    color: palette.textSecondary,
-    fontSize: 13,
-    marginTop: 2,
-  },
-  threadSubjectUnread: { color: palette.textPrimary, fontWeight: '600' },
-  threadSnippet: {
     color: palette.textMuted,
     fontSize: 13,
     marginTop: 1,
   },
+  threadSubjectUnread: { color: palette.textPrimary, fontWeight: '600' },
+  threadSnippet: {
+    color: palette.textMuted,
+    fontSize: 12,
+    marginTop: 2,
+    lineHeight: 16,
+  },
   unreadDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
     backgroundColor: palette.unread,
-    marginTop: 18,
+    marginTop: 12,
+  },
+  unreadDotPlaceholder: {
+    width: 6,
+    height: 6,
+    marginTop: 12,
   },
   fab: {
     position: 'absolute',
@@ -782,8 +938,14 @@ const styles = StyleSheet.create({
     padding: 32,
     gap: 8,
   },
-  emptyTitle: { color: palette.textPrimary, fontSize: 16, fontWeight: '600', marginTop: 8 },
-  emptyHint: { color: palette.textMuted, fontSize: 13 },
+  emptyTitle: { color: palette.textPrimary, fontSize: 18, fontWeight: '500', marginTop: 8 },
+  emptyHint: { color: palette.textMuted, fontSize: 14 },
+  emptyClear: {
+    color: palette.accentSoft,
+    fontSize: 13,
+    marginTop: 4,
+    textDecorationLine: 'underline',
+  },
   error: { color: palette.danger, fontSize: 13, marginTop: 8, marginHorizontal: 14 },
   drawerOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -798,72 +960,69 @@ const styles = StyleSheet.create({
     maxHeight: '100%',
     paddingTop: 32,
   },
-  drawerScroll: { paddingHorizontal: 12, paddingTop: 8, paddingBottom: 12, flexGrow: 1 },
-  drawerHeader: { paddingHorizontal: 8, paddingBottom: 16 },
+  drawerScroll: { paddingHorizontal: 8, paddingTop: 8, paddingBottom: 12, flexGrow: 1 },
+  drawerHeader: { paddingHorizontal: 8, paddingBottom: 12 },
   drawerBrand: {
     color: palette.textPrimary,
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '700',
     letterSpacing: -0.3,
   },
   drawerProfile: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 10,
     paddingHorizontal: 8,
-    paddingBottom: 16,
+    paddingBottom: 12,
     borderBottomWidth: 1,
     borderBottomColor: palette.divider,
     marginBottom: 8,
   },
-  drawerName: { color: palette.textPrimary, fontSize: 15, fontWeight: '600' },
-  drawerEmail: { color: palette.textMuted, fontSize: 12, marginTop: 2 },
+  drawerName: { color: palette.textPrimary, fontSize: 13, fontWeight: '600' },
+  drawerEmail: { color: palette.textMuted, fontSize: 11, marginTop: 1 },
   drawerSection: {
-    color: palette.textFaint,
-    fontSize: 11,
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
+    color: palette.textMuted,
+    fontSize: 13,
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingTop: 8,
+    paddingBottom: 4,
   },
   drawerItem: {
-    height: 44,
+    height: 36,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 12,
-    paddingRight: 16,
-    borderRadius: 22,
+    paddingRight: 14,
+    borderRadius: 6,
     marginBottom: 1,
   },
-  drawerItemActive: { backgroundColor: palette.accentBg },
-  drawerItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 16 },
-  drawerItemText: { color: palette.textSecondary, fontSize: 14 },
-  drawerItemTextActive: { color: palette.accentSoft, fontSize: 14, fontWeight: '700' },
-  drawerCount: { color: palette.textMuted, fontSize: 12, fontWeight: '600' },
-  drawerCountActive: { color: palette.accentSoft, fontSize: 12, fontWeight: '700' },
+  drawerItemActive: { backgroundColor: palette.surfaceHover },
+  drawerItemLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  drawerItemText: { color: palette.textSecondary, fontSize: 13 },
+  drawerItemTextActive: { color: palette.textPrimary, fontSize: 13, fontWeight: '500' },
+  drawerCount: { color: palette.textMuted, fontSize: 12 },
+  drawerCountActive: { color: palette.textMuted, fontSize: 12 },
   drawerDivider: {
     height: 1,
     backgroundColor: palette.divider,
-    marginVertical: 8,
+    marginVertical: 6,
     marginHorizontal: 12,
   },
   drawerFooter: {
-    paddingHorizontal: 16,
+    paddingHorizontal: 12,
     paddingVertical: 12,
     borderTopWidth: 1,
     borderTopColor: palette.divider,
     gap: 6,
   },
-  walletHint: { color: palette.textFaint, fontSize: 11 },
-  sessionRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 },
+  sessionRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
   walletLabel: {
     color: palette.textSecondary,
     fontSize: 10,
     fontWeight: '700',
     letterSpacing: 0.6,
   },
-  walletBalance: { color: palette.accentSoft, fontSize: 10, fontWeight: '600', marginLeft: 'auto' },
   walletAddrFull: {
     color: palette.textMuted,
     fontSize: 10,
@@ -871,4 +1030,34 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   signOutLink: { color: palette.accentSoft, fontSize: 13, fontWeight: '600', paddingVertical: 4 },
+  menuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    paddingTop: 56,
+    paddingRight: 8,
+    alignItems: 'flex-end',
+  },
+  menuPopover: {
+    backgroundColor: palette.surfaceElevated,
+    borderRadius: 10,
+    minWidth: 180,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: palette.border,
+    shadowColor: '#000',
+    shadowOpacity: 0.5,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 12,
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  menuItemPressed: { backgroundColor: palette.surfaceHover },
+  menuItemText: { color: palette.textPrimary, fontSize: 13, flex: 1 },
+  menuDot: { width: 8, height: 8, borderRadius: 4 },
 });

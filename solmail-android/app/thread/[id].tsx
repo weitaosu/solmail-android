@@ -44,13 +44,13 @@ function buildEmailDoc(innerHtml: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=2"/>
   <style>
-    html, body { margin:0; padding:0; background:#12151c; color:#e8edf6;
+    html, body { margin:0; padding:0; background:#1A1A1A; color:#FFFFFF;
       font: 15px/1.55 -apple-system, Roboto, "Helvetica Neue", sans-serif;
       word-wrap: break-word; overflow-wrap: anywhere; }
     body { padding: 4px 2px 8px; }
-    a { color:#6b9ef5; }
-    blockquote { border-left:3px solid #2d3444; margin:8px 0; padding:4px 10px; color:#a4adbd; }
-    pre, code { background:#0f1117; color:#e6edfa; border-radius:6px; padding:2px 6px; }
+    a { color:#3D8CFF; }
+    blockquote { border-left:3px solid #202020; margin:8px 0; padding:4px 10px; color:#8C8C8C; }
+    pre, code { background:#0A0A0A; color:#E5E5E5; border-radius:6px; padding:2px 6px; }
     img, video, iframe { max-width:100% !important; height:auto !important; }
     table { max-width:100% !important; }
     * { max-width: 100%; }
