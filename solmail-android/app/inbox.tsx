@@ -18,7 +18,6 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import * as Haptics from 'expo-haptics';
-import * as Linking from 'expo-linking';
 import { useMobileWallet } from '@/src/wallet/mobile-wallet-provider';
 import { clearAuthSession, clearMobileToken } from '@/src/auth/session-store';
 import { trpc } from '@/src/api/trpc';
@@ -69,6 +68,8 @@ type ThreadPreview = {
   snippet: string;
   dateIso: string;
   isUnread: boolean;
+  /** Uppercased Gmail label IDs on the thread (INBOX, IMPORTANT, CATEGORY_*, etc.) */
+  labels: string[];
 };
 
 const SCREEN_W = Dimensions.get('window').width;
@@ -114,7 +115,7 @@ function folderLabel(folder: MailFolder): string[] {
 
 export default function InboxScreen() {
   const router = useRouter();
-  const { account, disconnect } = useMobileWallet();
+  const { disconnect } = useMobileWallet();
   const [threads, setThreads] = useState<ThreadPreview[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -136,7 +137,6 @@ export default function InboxScreen() {
   const isGmail = (connection?.email || '').toLowerCase().endsWith('@gmail.com');
   const activeCategory = CATEGORIES.find((c) => c.key === categoryKey) ?? CATEGORIES[0]!;
 
-  const walletAddress = useMemo(() => account?.publicKey.toBase58() || '', [account]);
   const countMap = useMemo(() => statsByLabel(stats), [stats]);
 
   const countFor = useCallback(
@@ -247,6 +247,13 @@ export default function InboxScreen() {
                 : dateRaw instanceof Date
                   ? dateRaw.toISOString()
                   : '';
+            const rawLabels = (threadData.labels as { id?: string; name?: string }[] | undefined) ?? [];
+            const labels = rawLabels
+              .map((l) => (l.id || l.name || '').toUpperCase())
+              .filter(Boolean);
+            // Gmail's listThreads only flips hasUnread when UNREAD is on every
+            // message; keep the cheap label-based check as a fallback.
+            const isUnread = Boolean(threadData.hasUnread) || labels.includes('UNREAD');
             return {
               id,
               from: fromName,
@@ -254,7 +261,8 @@ export default function InboxScreen() {
               subject,
               snippet,
               dateIso,
-              isUnread: Boolean(threadData.hasUnread),
+              isUnread,
+              labels,
             } as ThreadPreview;
           } catch {
             return {
@@ -265,6 +273,7 @@ export default function InboxScreen() {
               snippet: '',
               dateIso: '',
               isUnread: true,
+              labels: [],
             } as ThreadPreview;
           }
         }),
@@ -401,10 +410,25 @@ export default function InboxScreen() {
   };
 
   const visibleThreads = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const filtered = optimisticRemovedIds.size
+    let filtered = optimisticRemovedIds.size
       ? threads.filter((t) => !optimisticRemovedIds.has(t.id))
       : threads;
+
+    /**
+     * Client-side category filter — defense in depth even if the backend's
+     * listThreads doesn't honor labelIds. The active category's labels must
+     * ALL be present on a thread for it to pass. "All Mail" passes
+     * everything; "Unread" matches by isUnread (cheaper than the label
+     * check).
+     */
+    if (categoryKey === 'unread') {
+      filtered = filtered.filter((t) => t.isUnread);
+    } else if (activeCategory.labelIds.length) {
+      const required = activeCategory.labelIds.map((l) => l.toUpperCase());
+      filtered = filtered.filter((t) => required.every((r) => t.labels.includes(r)));
+    }
+
+    const q = query.trim().toLowerCase();
     if (!q) return filtered;
     return filtered.filter(
       (thread) =>
@@ -412,7 +436,8 @@ export default function InboxScreen() {
         thread.subject.toLowerCase().includes(q) ||
         thread.snippet.toLowerCase().includes(q),
     );
-  }, [query, threads, optimisticRemovedIds]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, threads, optimisticRemovedIds, categoryKey]);
 
   const formatCompactTime = (iso: string) => {
     if (!iso) return '';
@@ -737,29 +762,6 @@ export default function InboxScreen() {
             </ScrollView>
 
             <View style={styles.drawerFooter}>
-              {!!walletAddress && (
-                <View style={styles.walletBlock}>
-                  <View style={styles.sessionRow}>
-                    <Feather name="shield" size={12} color={palette.textFaint} />
-                    <Text style={styles.walletLabel}>WALLET</Text>
-                    <Pressable
-                      hitSlop={6}
-                      onPress={() =>
-                        void Linking.openURL(
-                          `https://explorer.solana.com/address/${walletAddress}?cluster=devnet`,
-                        )
-                      }
-                      style={styles.walletExplorerBtn}
-                    >
-                      <Feather name="external-link" size={11} color={palette.accentSoft} />
-                      <Text style={styles.walletExplorerText}>Explorer</Text>
-                    </Pressable>
-                  </View>
-                  <Text style={styles.walletAddrFull} selectable>
-                    {walletAddress}
-                  </Text>
-                </View>
-              )}
               <Pressable onPress={() => handleSignOut()} hitSlop={6}>
                 <Text style={styles.signOutLink}>Sign out</Text>
               </Pressable>
@@ -1020,36 +1022,6 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: palette.divider,
     gap: 6,
-  },
-  walletBlock: {
-    paddingVertical: 6,
-    gap: 4,
-  },
-  sessionRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  walletLabel: {
-    color: palette.textSecondary,
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-    flex: 1,
-  },
-  walletExplorerBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  walletExplorerText: {
-    color: palette.accentSoft,
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  walletAddrFull: {
-    color: palette.textPrimary,
-    fontSize: 12,
-    fontFamily: 'monospace',
-    lineHeight: 16,
   },
   signOutLink: { color: palette.accentSoft, fontSize: 13, fontWeight: '600', paddingVertical: 4 },
   menuBackdrop: {
