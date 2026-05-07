@@ -15,7 +15,8 @@ export default function HomeScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL;
-  const logoUri = backendUrl ? `${backendUrl.replace(':8787', ':3000')}/solmail-logo.png` : null;
+  const appUrl = process.env.EXPO_PUBLIC_APP_URL ?? backendUrl?.replace(':8787', ':3000');
+  const logoUri = appUrl ? `${appUrl}/solmail-logo.png` : null;
 
   useEffect(() => {
     const restoreSession = async () => {
@@ -47,13 +48,11 @@ export default function HomeScreen() {
         scheme: 'solmailandroid',
         isTripleSlashed: false,
       });
-      const appUrl = backendUrl.replace(':8787', ':3000');
-      const callbackUrl = `${backendUrl}/api/public/mobile-auth-callback?redirect=${encodeURIComponent(
-        redirectUrl,
-      )}`;
-      const authUrl = `${appUrl}/login?mobileRedirect=${encodeURIComponent(
-        redirectUrl,
-      )}&callbackURL=${encodeURIComponent(callbackUrl)}&autoProvider=google`;
+      if (!appUrl) {
+        setError('Missing app URL configuration.');
+        return;
+      }
+      const authUrl = `${appUrl}/login?mobileRedirect=${encodeURIComponent(redirectUrl)}&autoProvider=google`;
 
       const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUrl);
 

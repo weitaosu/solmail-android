@@ -30,6 +30,7 @@
 
 - **Short summary (<150 chars)**: `TODO: add final short summary`
 - **Technical description (SDKs + sponsor tech)**: `TODO: add final technical description`
+- **Download APK**: [solmail-consensus-v1.apk](./solmail-consensus-v1.apk)
 - **Canva slides**: `TODO: add Canva link`
 - **Demo video (with audio)**: `TODO: add video link`
 - **Screenshots**: `TODO: add screenshot links`

@@ -7,7 +7,7 @@ import {
   SuperSearchEmail,
   WelcomeEmail,
 } from './react-emails/email-sequences';
-import { createAuthMiddleware, phoneNumber, jwt, bearer, mcp } from 'better-auth/plugins';
+import { createAuthMiddleware, phoneNumber, jwt, bearer } from 'better-auth/plugins';
 import { type Account, betterAuth, type BetterAuthOptions } from 'better-auth';
 import { getBrowserTimezone, isValidTimezone } from './timezones';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
@@ -155,9 +155,6 @@ export const createAuth = () => {
     plugins: [
       dubAnalytics({
         dubClient: dub,
-      }),
-      mcp({
-        loginPage: env.VITE_PUBLIC_APP_URL + '/login',
       }),
       jwt(),
       bearer(),
@@ -328,21 +325,30 @@ export const createAuth = () => {
 const createAuthConfig = () => {
   const cache = redis();
   const { db } = createDb(env.HYPERDRIVE.connectionString);
+  const extraTrustedOrigins = (env.BETTER_AUTH_TRUSTED_ORIGINS || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  const hasRedisConfig = Boolean(env.REDIS_URL && env.REDIS_TOKEN);
   return {
     database: drizzleAdapter(db, { provider: 'pg' }),
-    secondaryStorage: {
-      get: async (key: string) => {
-        const value = await cache.get(key);
-        return typeof value === 'string' ? value : value ? JSON.stringify(value) : null;
-      },
-      set: async (key: string, value: string, ttl?: number) => {
-        if (ttl) await cache.set(key, value, { ex: ttl });
-        else await cache.set(key, value);
-      },
-      delete: async (key: string) => {
-        await cache.del(key);
-      },
-    },
+    ...(hasRedisConfig
+      ? {
+          secondaryStorage: {
+            get: async (key: string) => {
+              const value = await cache.get(key);
+              return typeof value === 'string' ? value : value ? JSON.stringify(value) : null;
+            },
+            set: async (key: string, value: string, ttl?: number) => {
+              if (ttl) await cache.set(key, value, { ex: ttl });
+              else await cache.set(key, value);
+            },
+            delete: async (key: string) => {
+              await cache.del(key);
+            },
+          },
+        }
+      : {}),
     advanced: {
       ipAddress: {
         disableIpTracking: true,
@@ -360,6 +366,7 @@ const createAuthConfig = () => {
       'https://api.solmail.xyz',
       'http://localhost:3000',
       'http://localhost:8787',
+      ...extraTrustedOrigins,
     ],
     session: {
       cookieCache: {
