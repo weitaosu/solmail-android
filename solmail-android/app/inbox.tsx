@@ -738,22 +738,27 @@ export default function InboxScreen() {
 
             <View style={styles.drawerFooter}>
               {!!walletAddress && (
-                <Pressable
-                  onPress={() =>
-                    void Linking.openURL(
-                      `https://explorer.solana.com/address/${walletAddress}?cluster=devnet`,
-                    )
-                  }
-                  hitSlop={4}
-                >
+                <View style={styles.walletBlock}>
                   <View style={styles.sessionRow}>
-                    <Feather name="shield" size={11} color={palette.textFaint} />
+                    <Feather name="shield" size={12} color={palette.textFaint} />
                     <Text style={styles.walletLabel}>WALLET</Text>
+                    <Pressable
+                      hitSlop={6}
+                      onPress={() =>
+                        void Linking.openURL(
+                          `https://explorer.solana.com/address/${walletAddress}?cluster=devnet`,
+                        )
+                      }
+                      style={styles.walletExplorerBtn}
+                    >
+                      <Feather name="external-link" size={11} color={palette.accentSoft} />
+                      <Text style={styles.walletExplorerText}>Explorer</Text>
+                    </Pressable>
                   </View>
-                  <Text style={styles.walletAddrFull} selectable numberOfLines={1}>
+                  <Text style={styles.walletAddrFull} selectable>
                     {walletAddress}
                   </Text>
-                </Pressable>
+                </View>
               )}
               <Pressable onPress={() => handleSignOut()} hitSlop={6}>
                 <Text style={styles.signOutLink}>Sign out</Text>
@@ -1016,18 +1021,35 @@ const styles = StyleSheet.create({
     borderTopColor: palette.divider,
     gap: 6,
   },
-  sessionRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
+  walletBlock: {
+    paddingVertical: 6,
+    gap: 4,
+  },
+  sessionRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   walletLabel: {
     color: palette.textSecondary,
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
     letterSpacing: 0.6,
+    flex: 1,
+  },
+  walletExplorerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  walletExplorerText: {
+    color: palette.accentSoft,
+    fontSize: 11,
+    fontWeight: '600',
   },
   walletAddrFull: {
-    color: palette.textMuted,
-    fontSize: 10,
+    color: palette.textPrimary,
+    fontSize: 12,
     fontFamily: 'monospace',
-    marginTop: 2,
+    lineHeight: 16,
   },
   signOutLink: { color: palette.accentSoft, fontSize: 13, fontWeight: '600', paddingVertical: 4 },
   menuBackdrop: {
