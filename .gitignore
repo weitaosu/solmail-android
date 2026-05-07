@@ -1,6 +1,7 @@
 .cursor/*
 !.cursor/rules/
 !.cursor/rules/**
+.claude/
 .DS_Store
 
 # Rust/Anchor build artifacts

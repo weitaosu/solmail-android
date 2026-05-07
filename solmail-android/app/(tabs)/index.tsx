@@ -1,19 +1,19 @@
 import { useEffect, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { useMobileWallet } from '@/src/wallet/mobile-wallet-provider';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
+import { Feather } from '@expo/vector-icons';
 import { getAuthSession, setAuthSession, setMobileToken } from '@/src/auth/session-store';
+import { palette } from '@/constants/colors';
 
 WebBrowser.maybeCompleteAuthSession();
 
 export default function HomeScreen() {
-  const { account, signIn, disconnect } = useMobileWallet();
   const router = useRouter();
-  const [status, setStatus] = useState('Ready');
   const [busy, setBusy] = useState(false);
-  const [backendStatus, setBackendStatus] = useState('Checking...');
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const restoreSession = async () => {
@@ -22,34 +22,24 @@ export default function HomeScreen() {
         router.replace('/inbox');
       }
     };
-
     void restoreSession();
   }, [router]);
 
-  useEffect(() => {
-    const checkBackend = async () => {
-      const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL;
-      if (!backendUrl) {
-        setBackendStatus('Missing EXPO_PUBLIC_BACKEND_URL');
-        return;
-      }
-      try {
-        const res = await fetch(`${backendUrl}/api/public/providers`);
-        setBackendStatus(res.ok ? 'Connected' : `Error ${res.status}`);
-      } catch {
-        setBackendStatus('Not reachable');
-      }
-    };
-    void checkBackend();
-  }, []);
+  const normalizeError = (err: unknown) => {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    if (message.includes('Found no installed wallet')) {
+      return 'No compatible Solana wallet found on this device.';
+    }
+    return message;
+  };
 
   const handleGetStarted = async () => {
     try {
       setBusy(true);
-      setStatus('Opening Google login...');
+      setError(null);
       const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL;
       if (!backendUrl) {
-        setStatus('Missing backend URL');
+        setError('Missing backend URL configuration.');
         return;
       }
       const redirectUrl = Linking.createURL('auth-callback', {
@@ -72,122 +62,133 @@ export default function HomeScreen() {
           typeof parsed.queryParams?.token === 'string' ? parsed.queryParams.token : null;
         const sessionValue = tokenParam || `oauth:${Date.now()}`;
         await setAuthSession(sessionValue);
-        if (tokenParam) {
-          await setMobileToken(tokenParam);
-        }
-        setStatus('Google auth complete. Opening inbox...');
+        if (tokenParam) await setMobileToken(tokenParam);
         router.replace('/inbox');
       } else if (result.type === 'cancel' || result.type === 'dismiss') {
-        setStatus('Google login cancelled.');
+        // Silent — user backed out.
       } else {
-        // Fallback: keep prior browser-based flow if custom tab auth session fails.
         await WebBrowser.openBrowserAsync(authUrl);
-        setStatus('Complete Google login in browser.');
+        setError('Complete login in the browser, then return to the app.');
       }
-    } catch (error) {
-      setStatus(`Get started failed: ${normalizeError(error)}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const normalizeError = (error: unknown) => {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    if (message.includes('Found no installed wallet')) {
-      return 'No compatible wallet found. Install/setup a Solana wallet on this device.';
-    }
-    return message;
-  };
-
-  const handleSignIn = async () => {
-    try {
-      setBusy(true);
-      setStatus('Signing in...');
-      await signIn();
-      setStatus('SIWS success. Continue to inbox.');
-    } catch (error) {
-      setStatus(`Sign-in failed: ${normalizeError(error)}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleDisconnect = async () => {
-    try {
-      setBusy(true);
-      setStatus('Disconnecting...');
-      await disconnect();
-      setStatus('Disconnected');
-    } catch (error) {
-      setStatus(`Disconnect failed: ${normalizeError(error)}`);
+    } catch (err) {
+      setError(`Sign-in failed: ${normalizeError(err)}`);
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Login to SolMail</Text>
-      <Text style={styles.subtitle}>Get started with your Google account</Text>
-      <View style={styles.errorBox}>
-        <Text style={styles.errorLabel}>Status</Text>
-        <Text style={styles.errorText}>{status}</Text>
+    <SafeAreaView style={styles.shell} edges={['top', 'bottom']}>
+      <View style={styles.hero}>
+        <View style={styles.logoCircle}>
+          <Feather name="mail" size={42} color="#fff" />
+        </View>
+        <Text style={styles.title}>SolMail</Text>
+        <Text style={styles.tagline}>An incentivized inbox for richer replies.</Text>
       </View>
-      <Text style={styles.label}>Backend: {backendStatus}</Text>
-      <Text style={styles.label}>Address: {account?.publicKey.toBase58() || 'Not connected'}</Text>
-      <Pressable disabled={busy} style={[styles.button, busy && styles.buttonDisabled]} onPress={handleGetStarted}>
-        <Text style={styles.buttonText}>{busy ? 'Please wait...' : 'Get Started'}</Text>
-      </Pressable>
-      <Text style={styles.helper}>After Google login, come back here to connect wallet.</Text>
-      <Pressable disabled={busy} style={[styles.button, busy && styles.buttonDisabled]} onPress={handleSignIn}>
-        <Text style={styles.buttonText}>{busy ? 'Please wait...' : 'Sign In (SIWS)'}</Text>
-      </Pressable>
-      <Pressable disabled={busy} style={[styles.buttonSecondary, busy && styles.buttonDisabled]} onPress={handleDisconnect}>
-        <Text style={styles.buttonText}>Disconnect</Text>
-      </Pressable>
-      {account && (
-        <Pressable style={styles.button} onPress={() => router.push('/inbox')}>
-          <Text style={styles.buttonText}>Continue to Inbox</Text>
+
+      <View style={styles.actions}>
+        <Pressable
+          disabled={busy}
+          style={({ pressed }) => [
+            styles.primaryButton,
+            (busy || pressed) && styles.primaryButtonPressed,
+          ]}
+          onPress={handleGetStarted}
+        >
+          {busy ? (
+            <ActivityIndicator size="small" color="#fff" />
+          ) : (
+            <>
+              <Feather name="log-in" size={18} color="#fff" />
+              <Text style={styles.primaryButtonText}>Continue with Google</Text>
+            </>
+          )}
         </Pressable>
-      )}
-    </View>
+
+        {!!error && (
+          <View style={styles.errorBanner}>
+            <Feather name="alert-circle" size={14} color={palette.danger} />
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        )}
+
+        <Text style={styles.helper}>
+          Your Solana wallet is requested only when sending mail.
+        </Text>
+      </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  shell: {
     flex: 1,
-    padding: 24,
+    padding: 32,
+    backgroundColor: palette.surface,
+    justifyContent: 'space-between',
+  },
+  hero: {
+    alignItems: 'center',
+    marginTop: 80,
+  },
+  logoCircle: {
+    width: 84,
+    height: 84,
+    borderRadius: 42,
+    backgroundColor: palette.accent,
+    alignItems: 'center',
     justifyContent: 'center',
-    gap: 12,
-    backgroundColor: '#0e0e11',
+    marginBottom: 24,
+    shadowColor: palette.accent,
+    shadowOpacity: 0.5,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
   },
-  title: { fontSize: 42, fontWeight: '700', color: '#f5f5f5' },
-  subtitle: { fontSize: 18, color: '#bcbcbc', marginBottom: 10 },
-  label: { fontSize: 14, color: '#d2d2d2' },
-  errorBox: {
-    borderWidth: 1,
-    borderColor: '#a65d2b',
-    borderRadius: 10,
-    backgroundColor: '#332216',
+  title: {
+    color: palette.textPrimary,
+    fontSize: 38,
+    fontWeight: '700',
+    letterSpacing: -0.5,
+    marginBottom: 8,
+  },
+  tagline: {
+    color: palette.textMuted,
+    fontSize: 15,
+    textAlign: 'center',
+    paddingHorizontal: 16,
+    lineHeight: 22,
+  },
+  actions: {
+    gap: 14,
+    marginBottom: 24,
+  },
+  primaryButton: {
+    backgroundColor: palette.accent,
+    height: 52,
+    borderRadius: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  primaryButtonPressed: { opacity: 0.85 },
+  primaryButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  helper: {
+    color: palette.textFaint,
+    fontSize: 12,
+    textAlign: 'center',
+  },
+  errorBanner: {
     padding: 12,
-    marginBottom: 10,
-  },
-  errorLabel: { color: '#f2b990', fontWeight: '600', marginBottom: 4 },
-  errorText: { color: '#f5d2b9', fontSize: 14 },
-  button: {
-    backgroundColor: '#1f7de8',
-    paddingVertical: 14,
-    borderRadius: 8,
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#2a1a1f',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#5a2a32',
   },
-  buttonSecondary: {
-    backgroundColor: '#2a2a30',
-    paddingVertical: 14,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  buttonDisabled: { opacity: 0.6 },
-  buttonText: { color: '#fff', fontWeight: '700', fontSize: 18 },
-  helper: { color: '#bcbcbc', fontSize: 13 },
+  errorText: { color: palette.danger, fontSize: 13, flex: 1 },
 });
