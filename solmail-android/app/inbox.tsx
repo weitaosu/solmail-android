@@ -113,6 +113,31 @@ function folderLabel(folder: MailFolder): string[] {
   }
 }
 
+function toIsoDate(value: unknown): string {
+  if (!value) return '';
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? '' : value.toISOString();
+  if (typeof value === 'number') {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    if (/^\d+$/.test(trimmed)) {
+      // Gmail internalDate often arrives as epoch milliseconds in a string.
+      const numeric = Number(trimmed);
+      if (Number.isFinite(numeric)) {
+        const asDate = new Date(numeric);
+        if (!Number.isNaN(asDate.getTime())) return asDate.toISOString();
+      }
+      return '';
+    }
+    const date = new Date(trimmed);
+    return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+  }
+  return '';
+}
+
 export default function InboxScreen() {
   const router = useRouter();
   const { disconnect } = useMobileWallet();
@@ -240,13 +265,18 @@ export default function InboxScreen() {
                 .replace(/<[^>]*>/g, ' ')
                 .replace(/\s+/g, ' ')
                 .trim() || '';
-            const dateRaw = latest?.internalDate || latest?.date || '';
-            const dateIso =
-              typeof dateRaw === 'string'
-                ? dateRaw
-                : dateRaw instanceof Date
-                  ? dateRaw.toISOString()
-                  : '';
+            const dateRaw =
+              latest?.internalDate ||
+              latest?.date ||
+              latest?.receivedOn ||
+              threadData.latest?.internalDate ||
+              threadData.latest?.date ||
+              threadData.latest?.receivedOn ||
+              thread.internalDate ||
+              thread.date ||
+              thread.receivedOn ||
+              '';
+            const dateIso = toIsoDate(dateRaw);
             const rawLabels = (threadData.labels as { id?: string; name?: string }[] | undefined) ?? [];
             const labels = rawLabels
               .map((l) => (l.id || l.name || '').toUpperCase())
@@ -450,9 +480,11 @@ export default function InboxScreen() {
       date.getDate() === now.getDate();
     if (isToday) return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     const sameYear = date.getFullYear() === now.getFullYear();
-    return sameYear
+    const datePart = sameYear
       ? date.toLocaleDateString([], { month: 'short', day: 'numeric' })
       : date.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
+    const timePart = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return `${datePart}, ${timePart}`;
   };
 
   const folderTitle =
