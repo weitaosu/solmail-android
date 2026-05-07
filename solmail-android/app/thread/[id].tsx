@@ -106,7 +106,16 @@ export default function ThreadScreen() {
           </Pressable>
         </View>
         <View style={styles.headerRight}>
-          <Pressable style={styles.replyAllButton}>
+          <Pressable
+            style={styles.replyAllButton}
+            disabled={loading || !!error || !id}
+            onPress={() =>
+              router.push({
+                pathname: '/compose',
+                params: id ? { replyThread: String(id) } : {},
+              })
+            }
+          >
             <Text style={styles.replyAllText}>Reply all</Text>
           </Pressable>
           <Pressable style={styles.iconButton}>
