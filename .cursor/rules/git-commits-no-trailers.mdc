@@ -1,0 +1,10 @@
+---
+description: Never add co-authors or git commit trailers
+alwaysApply: true
+---
+
+# Git commits
+
+Never add **any** `Co-authored-by:` line or other trailer footers (`git commit --trailer …`). Never attribute tools, bots, or co-authors in the commit message unless the human author adds that text themselves.
+
+The repo `.githooks/commit-msg` strips `Co-authored-by:` lines; after clone run: `git config core.hooksPath .githooks`
