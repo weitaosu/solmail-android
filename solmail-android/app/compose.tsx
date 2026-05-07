@@ -39,21 +39,58 @@ const ESCROW_STATUS_PENDING = 0;
 
 type EscrowMeta = { senderPubkey: string; threadIdHex: string };
 
-function getHeaderInsensitive(headers: Record<string, string> | undefined, canonical: string) {
-  if (!headers) return undefined;
-  const want = canonical.toLowerCase();
-  for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() === want && typeof v === 'string' && v.trim()) return v.trim();
+function normalizeHeaderEntries(headers: unknown): Array<[string, string]> {
+  if (!headers) return [];
+  if (Array.isArray(headers)) {
+    return headers
+      .map((h) => {
+        const row = h as { name?: unknown; key?: unknown; value?: unknown };
+        const key = typeof row.name === 'string' ? row.name : typeof row.key === 'string' ? row.key : '';
+        const value = typeof row.value === 'string' ? row.value : '';
+        return key && value ? ([key, value] as [string, string]) : null;
+      })
+      .filter((x): x is [string, string] => Boolean(x));
+  }
+  if (typeof headers === 'object') {
+    return Object.entries(headers as Record<string, unknown>)
+      .map(([k, v]) => (typeof v === 'string' && v.trim() ? ([k, v] as [string, string]) : null))
+      .filter((x): x is [string, string] => Boolean(x));
+  }
+  return [];
+}
+
+function getHeaderInsensitive(headers: unknown, keys: string[]) {
+  const wanted = new Set(keys.map((k) => k.toLowerCase()));
+  for (const [k, v] of normalizeHeaderEntries(headers)) {
+    if (wanted.has(k.toLowerCase()) && v.trim()) return v.trim();
   }
   return undefined;
 }
 
 /** First message in the thread carrying SolMail escrow headers (for reply settlement). */
 function findSolmailEscrowHeaders(messages: unknown[]): EscrowMeta | null {
+  const threadIdKeys = [
+    'X-Solmail-Thread-Id',
+    'x-solmail-thread-id',
+    'X-SOLMAIL-THREAD-ID',
+    'X-Solmail-Thread-ID',
+  ];
+  const senderPubkeyKeys = [
+    'X-Solmail-Sender-Pubkey',
+    'x-solmail-sender-pubkey',
+    'X-SOLMAIL-SENDER-PUBKEY',
+    'X-Solmail-Sender-PUBKEY',
+    'X-Solmail-Sender-Public-Key',
+    'x-solmail-sender-public-key',
+  ];
   for (const msg of messages) {
-    const h = (msg as { headers?: Record<string, string> }).headers;
-    const tid = getHeaderInsensitive(h, 'X-Solmail-Thread-Id');
-    const spk = getHeaderInsensitive(h, 'X-Solmail-Sender-Pubkey');
+    const m = msg as { headers?: unknown; payload?: { headers?: unknown } };
+    const tid =
+      getHeaderInsensitive(m.headers, threadIdKeys) ||
+      getHeaderInsensitive(m.payload?.headers, threadIdKeys);
+    const spk =
+      getHeaderInsensitive(m.headers, senderPubkeyKeys) ||
+      getHeaderInsensitive(m.payload?.headers, senderPubkeyKeys);
     if (!tid || !spk) continue;
     const hex = tid.replace(/^0x/i, '').trim();
     if (!/^[0-9a-fA-F]{64}$/.test(hex)) continue;
