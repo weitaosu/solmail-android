@@ -19,12 +19,14 @@ import { decide } from '../../routes/agent/escrow-decision';
 import { getEmailStatus } from '../../lib/email-status';
 
 // In-memory progress cache for email scoring
-// Key: requestId, Value: { step: string, data?: any, completed?: boolean, result?: any }
+// Key: requestId, Value: { step, data?, completed?, result?: { pass, score } }
+// `pass` is the authoritative gate; `score` is included for client-side debug
+// logging only (the UI never displays the number).
 const scoringProgressCache = new Map<string, {
-  step: 'reading_input' | 'calculating_score' | 'creating_recommendations' | 'completed';
+  step: 'reading_input' | 'calculating_score' | 'completed';
   data?: any;
   completed?: boolean;
-  result?: { score: number; recommendations: string[]; decision: 'RELEASE' | 'WITHHOLD' };
+  result?: { pass: boolean; score: number };
   error?: string;
 }>();
 
@@ -850,20 +852,23 @@ export const mailRouter = router({
           progressCallback
         );
         const score = scoringResult.score;
-        const recommendations = scoringResult.recommendations || [];
 
-        // Make decision based on score
+        // Server-side decision; clients only see the boolean.
         const decision = decide(score);
+        const pass = decision === 'RELEASE';
 
-        // Mark as completed
+        console.log('[scoreEmail]', {
+          requestId,
+          score,
+          decision,
+          pass,
+          replyPreview: input.replyContent.slice(0, 200),
+        });
+
         scoringProgressCache.set(requestId, {
           step: 'completed',
           completed: true,
-          result: {
-            score,
-            recommendations,
-            decision,
-          },
+          result: { pass, score },
         });
 
         // Clean up after 30 seconds
@@ -873,9 +878,8 @@ export const mailRouter = router({
 
         return {
           requestId,
+          pass,
           score,
-          recommendations,
-          decision,
           success: true,
         };
       } catch (error) {

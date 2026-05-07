@@ -26,6 +26,7 @@ import { useMobileWallet } from '@/src/wallet/mobile-wallet-provider';
 import { trpc } from '@/src/api/trpc';
 import { Avatar } from '@/components/ui/avatar';
 import { Chip } from '@/components/ui/chip';
+import { EmailScoringModal } from '@/components/email-scoring-modal';
 import { palette } from '@/constants/colors';
 
 /** Anchor `register_and_claim` discriminator: sha256("global:register_and_claim")[0:8]. */
@@ -329,6 +330,9 @@ export default function ComposeScreen() {
   const [fromEmail, setFromEmail] = useState<string>('');
 
   const replyEscrowMetaRef = useRef<EscrowMeta | null>(null);
+  const threadMessagesRef = useRef<{ decodedBody: string; subject: string }[]>([]);
+  const [scoringVisible, setScoringVisible] = useState(false);
+  const [scoringPass, setScoringPass] = useState<boolean | undefined>(undefined);
   const { account, connect, signAndSendTransactions } = useMobileWallet();
   /** 0.0000001 SOL per email — tiny test amount on devnet. */
   const ESCROW_AMOUNT_SOL = 0.0000001;
@@ -556,6 +560,13 @@ export default function ComposeScreen() {
         const messages = thread.messages ?? [];
         // Replies need escrow header lookup so we can claim on send.
         replyEscrowMetaRef.current = isReply ? findSolmailEscrowHeaders(messages) : null;
+        // Snapshot the thread for the quality-check call at send time.
+        threadMessagesRef.current = isReply
+          ? messages.map((m: { decodedBody?: string; body?: string; subject?: string }) => ({
+              decodedBody: m.decodedBody || m.body || '',
+              subject: m.subject || '',
+            }))
+          : [];
         const descSorted = [...messages].sort((a, b) => {
           const da = new Date((a as { receivedOn?: string }).receivedOn || 0).getTime();
           const db = new Date((b as { receivedOn?: string }).receivedOn || 0).getTime();
@@ -697,8 +708,38 @@ export default function ComposeScreen() {
        */
       const headers: Record<string, string> = {};
 
+      // Quick advisory quality check on replies — server makes the
+      // authoritative escrow decision after send, so we proceed regardless
+      // and only skip the on-chain claim popup when we already know fail.
+      // Fail closed on errors to match the web composer: if scoring is
+      // unreachable, skip the client claim and let the server agent decide.
+      let replyPassed = false;
       if (isReply) {
-        if (replyEscrowMetaRef.current) {
+        try {
+          setSendStatus('Checking reply…');
+          setScoringPass(undefined);
+          setScoringVisible(true);
+          const result = await trpc.mail.scoreEmail.mutate({
+            replyContent: body,
+            threadEmails:
+              threadMessagesRef.current.length > 0 ? threadMessagesRef.current : undefined,
+          });
+          replyPassed = result.pass;
+          setScoringPass(result.pass);
+          console.log(
+            `[scoring] ${result.pass ? 'PASS' : 'FAIL'} — score=${result.score}/100 (threshold 15)`,
+          );
+        } catch (scoreErr) {
+          console.warn('[scoring] quality check failed (non-blocking):', scoreErr);
+          setScoringVisible(false);
+        }
+      } else {
+        // Non-reply sends don't have an escrow to claim, so skip the gate.
+        replyPassed = true;
+      }
+
+      if (isReply) {
+        if (replyEscrowMetaRef.current && replyPassed) {
           setSendStatus('Sign claim in wallet…');
           await claimReplyEscrowIfPending();
         }
@@ -933,6 +974,11 @@ export default function ComposeScreen() {
           )}
         </ScrollView>
       </KeyboardAvoidingView>
+      <EmailScoringModal
+        visible={scoringVisible}
+        onDismiss={() => setScoringVisible(false)}
+        pass={scoringPass}
+      />
     </SafeAreaView>
   );
 }
