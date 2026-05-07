@@ -178,7 +178,12 @@ export default function InboxScreen() {
             const threadData = await trpc.mail.get.query({ id, forceFresh: false });
             const latest =
               threadData.latest || threadData.messages[threadData.messages.length - 1];
-            const from = latest?.from?.text || latest?.from?.address || 'Unknown sender';
+            const from =
+              latest?.sender?.name ||
+              latest?.sender?.email ||
+              latest?.from?.text ||
+              latest?.from?.address ||
+              'Unknown sender';
             const subject = latest?.subject || '(no subject)';
             const snippet =
               (latest?.decodedBody || latest?.body || '').replace(/<[^>]*>/g, ' ').trim() ||
@@ -342,7 +347,7 @@ export default function InboxScreen() {
         />
 
         {!drawerOpen && (
-          <Pressable style={styles.fab}>
+          <Pressable style={styles.fab} onPress={() => router.push('/compose')}>
             <Feather name="edit-2" size={18} color="#e8eef8" />
           </Pressable>
         )}
@@ -382,7 +387,7 @@ export default function InboxScreen() {
                 {displayEmail}
               </Text>
 
-              <Pressable style={styles.newMailButton}>
+              <Pressable style={styles.newMailButton} onPress={() => router.push('/compose')}>
                 <Feather name="edit-2" size={14} color="#e7efff" />
                 <Text style={styles.newMailButtonText}>New email</Text>
               </Pressable>
@@ -524,10 +529,10 @@ const styles = StyleSheet.create({
   topBar: {
     paddingHorizontal: 10,
     paddingTop: 4,
-    paddingBottom: 8,
+    paddingBottom: 6,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
   },
   folderStrip: {
     paddingHorizontal: 14,
@@ -539,9 +544,9 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   iconButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#151923',
@@ -550,8 +555,8 @@ const styles = StyleSheet.create({
   },
   searchWrap: {
     flex: 1,
-    minHeight: 36,
-    borderRadius: 10,
+    minHeight: 34,
+    borderRadius: 9,
     backgroundColor: '#151923',
     borderWidth: 1,
     borderColor: '#212735',
@@ -566,9 +571,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   categoryButton: {
-    minHeight: 36,
+    minHeight: 34,
     paddingHorizontal: 10,
-    borderRadius: 10,
+    borderRadius: 9,
     backgroundColor: '#151923',
     borderWidth: 1,
     borderColor: '#212735',
@@ -577,20 +582,20 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   categoryText: { color: '#cfd3db', fontSize: 12, fontWeight: '600' },
-  listContent: { paddingBottom: 24 },
+  listContent: { paddingBottom: 24, paddingTop: 2 },
   threadRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingVertical: 9,
     borderBottomWidth: 1,
     borderBottomColor: '#1a1f2a',
     gap: 10,
   },
   avatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     backgroundColor: '#2a2e38',
     alignItems: 'center',
     justifyContent: 'center',
@@ -599,7 +604,7 @@ const styles = StyleSheet.create({
   avatarText: { color: '#cfd3db', fontWeight: '700', fontSize: 15 },
   threadMain: { flex: 1 },
   rowTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  threadFrom: { color: '#f1f3f7', fontSize: 15, fontWeight: '700', flex: 1, marginRight: 8 },
+  threadFrom: { color: '#f1f3f7', fontSize: 14, fontWeight: '700', flex: 1, marginRight: 8 },
   timeWrap: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   unreadDot: {
     width: 8,
@@ -608,8 +613,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#1877f2',
   },
   threadTime: { color: '#959cac', fontSize: 12, fontWeight: '500' },
-  threadSubject: { color: '#d8dde8', fontSize: 14, marginTop: 2 },
-  threadSnippet: { color: '#9ca4b4', fontSize: 14, marginTop: 1 },
+  threadSubject: { color: '#d8dde8', fontSize: 13, marginTop: 1 },
+  threadSnippet: { color: '#9ca4b4', fontSize: 12, marginTop: 1 },
   fab: {
     position: 'absolute',
     right: 16,
