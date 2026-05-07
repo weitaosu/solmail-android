@@ -566,11 +566,26 @@ const api = new Hono<HonoContext>()
       const token = c.req.header('Authorization')?.split(' ')[1];
 
       if (token) {
-        const localJwks = await auth.api.getJwks();
-        const jwks = createLocalJWKSet(localJwks);
-
-        const { payload } = await jwtVerify(token, jwks);
-        const userId = payload.sub;
+        let userId: string | undefined;
+        try {
+          const localJwks = await auth.api.getJwks();
+          const jwks = createLocalJWKSet(localJwks);
+          const { payload } = await jwtVerify(token, jwks);
+          userId = payload.sub;
+        } catch {
+          try {
+            const secret = new TextEncoder().encode(c.env.JWT_SECRET);
+            const { payload } = await jwtVerify(token, secret, {
+              issuer: 'zero-mobile-auth',
+              audience: 'zero-mobile-app',
+            });
+            if (payload.typ === 'mobile-auth') {
+              userId = payload.sub;
+            }
+          } catch {
+            userId = undefined;
+          }
+        }
 
         if (userId) {
           const db = await getZeroDB(userId);

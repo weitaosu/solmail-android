@@ -1,5 +1,5 @@
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Suspense, useEffect, useState, type ReactNode } from 'react';
+import { Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { EnvVarInfo } from '@zero/server/auth-providers';
 import ErrorMessage from '@/app/(auth)/login/error-message';
 import { Google } from '@/components/icons/icons';
@@ -71,6 +71,9 @@ function LoginClientContent({ providers, isProd }: LoginClientProps) {
   const [error, _] = useQueryState('error');
   const [callbackURL] = useQueryState('callbackURL');
   const [mobileRedirect] = useQueryState('mobileRedirect');
+  const [autoProvider] = useQueryState('autoProvider');
+  const backendUrl = import.meta.env.VITE_PUBLIC_BACKEND_URL || window.location.origin;
+  const autoStartedRef = useRef(false);
 
   useEffect(() => {
     const missing = providers.find((p) => p.required && !p.enabled);
@@ -110,7 +113,7 @@ function LoginClientContent({ providers, isProd }: LoginClientProps) {
   const handleProviderClick = (provider: Provider) => {
     const computedCallbackURL =
       mobileRedirect && mobileRedirect.startsWith('solmailandroid://')
-        ? `${window.location.origin}/mail/inbox?mobileRedirect=${encodeURIComponent(mobileRedirect)}`
+        ? `${backendUrl}/api/public/mobile-auth-callback?redirect=${encodeURIComponent(mobileRedirect)}`
         : callbackURL || `${window.location.origin}/mail`;
 
     if (provider.isCustom && provider.customRedirectPath) {
@@ -127,6 +130,15 @@ function LoginClientContent({ providers, isProd }: LoginClientProps) {
       );
     }
   };
+
+  useEffect(() => {
+    if (autoStartedRef.current) return;
+    if (autoProvider !== 'google') return;
+    const provider = providers.find((p) => p.id === 'google' && (p.enabled || p.isCustom));
+    if (!provider) return;
+    autoStartedRef.current = true;
+    handleProviderClick(provider);
+  }, [autoProvider, providers]);
 
   const sortedProviders = [...displayProviders].sort((a, b) => {
     if (a.id === 'zero') return -1;

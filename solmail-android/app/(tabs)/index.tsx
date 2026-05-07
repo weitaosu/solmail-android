@@ -4,7 +4,7 @@ import { useMobileWallet } from '@/src/wallet/mobile-wallet-provider';
 import { useRouter } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
-import { getAuthSession } from '@/src/auth/session-store';
+import { getAuthSession, setAuthSession, setMobileToken } from '@/src/auth/session-store';
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -57,18 +57,31 @@ export default function HomeScreen() {
         isTripleSlashed: false,
       });
       const appUrl = backendUrl.replace(':8787', ':3000');
-      const authUrl = `${appUrl}/login?mobileRedirect=${encodeURIComponent(redirectUrl)}`;
+      const callbackUrl = `${backendUrl}/api/public/mobile-auth-callback?redirect=${encodeURIComponent(
+        redirectUrl,
+      )}`;
+      const authUrl = `${appUrl}/login?mobileRedirect=${encodeURIComponent(
+        redirectUrl,
+      )}&callbackURL=${encodeURIComponent(callbackUrl)}&autoProvider=google`;
 
       const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUrl);
 
       if (result.type === 'success') {
+        const parsed = Linking.parse(result.url);
+        const tokenParam =
+          typeof parsed.queryParams?.token === 'string' ? parsed.queryParams.token : null;
+        const sessionValue = tokenParam || `oauth:${Date.now()}`;
+        await setAuthSession(sessionValue);
+        if (tokenParam) {
+          await setMobileToken(tokenParam);
+        }
         setStatus('Google auth complete. Opening inbox...');
         router.replace('/inbox');
       } else if (result.type === 'cancel' || result.type === 'dismiss') {
         setStatus('Google login cancelled.');
       } else {
         // Fallback: keep prior browser-based flow if custom tab auth session fails.
-        await WebBrowser.openBrowserAsync(`${appUrl}/login`);
+        await WebBrowser.openBrowserAsync(authUrl);
         setStatus('Complete Google login in browser.');
       }
     } catch (error) {

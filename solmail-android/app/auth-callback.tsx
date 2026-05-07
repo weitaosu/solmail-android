@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useRouter } from 'expo-router';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import * as Linking from 'expo-linking';
-import { setAuthSession } from '@/src/auth/session-store';
+import { setAuthSession, setMobileToken } from '@/src/auth/session-store';
 
 export default function AuthCallbackScreen() {
   const router = useRouter();
@@ -16,6 +16,9 @@ export default function AuthCallbackScreen() {
       const sessionValue = tokenParam || `oauth:${Date.now()}`;
 
       await setAuthSession(sessionValue);
+      if (tokenParam) {
+        await setMobileToken(tokenParam);
+      }
       router.replace('/inbox');
     };
 
