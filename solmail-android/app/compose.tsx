@@ -81,6 +81,8 @@ export default function ComposeScreen() {
   const replyThreadRaw = params.replyThread;
   const replyThreadId =
     typeof replyThreadRaw === 'string' ? replyThreadRaw : replyThreadRaw?.[0];
+  /** Replies reuse the Gmail thread; only brand-new mails init on-chain escrow (matches web composer). */
+  const isReply = Boolean(replyThreadId);
 
   const { account, connect, signAndSendTransactions } = useMobileWallet();
   const [to, setTo] = useState('');
@@ -238,21 +240,35 @@ export default function ComposeScreen() {
         setError('Please add at least one recipient.');
         return;
       }
-      const activeAccount = await ensureWalletWithSol();
-      const escrow = await createEscrowForEmail(activeAccount.publicKey);
-      await trpc.mail.send.mutate({
-        to: recipients,
-        cc: ccRecipients.length ? ccRecipients : undefined,
-        bcc: bccRecipients.length ? bccRecipients : undefined,
-        subject: subject.trim() || '(no subject)',
-        message: body,
-        attachments: [],
-        threadId: replyThreadId || undefined,
-        headers: {
-          'X-Solmail-Sender-Pubkey': escrow.senderPubkey,
-          'X-Solmail-Thread-Id': escrow.threadIdHex,
-        },
-      });
+
+      if (isReply) {
+        await trpc.mail.send.mutate({
+          to: recipients,
+          cc: ccRecipients.length ? ccRecipients : undefined,
+          bcc: bccRecipients.length ? bccRecipients : undefined,
+          subject: subject.trim() || '(no subject)',
+          message: body,
+          attachments: [],
+          threadId: replyThreadId,
+          headers: {},
+        });
+      } else {
+        const activeAccount = await ensureWalletWithSol();
+        const escrow = await createEscrowForEmail(activeAccount.publicKey);
+        await trpc.mail.send.mutate({
+          to: recipients,
+          cc: ccRecipients.length ? ccRecipients : undefined,
+          bcc: bccRecipients.length ? bccRecipients : undefined,
+          subject: subject.trim() || '(no subject)',
+          message: body,
+          attachments: [],
+          headers: {
+            'X-Solmail-Sender-Pubkey': escrow.senderPubkey,
+            'X-Solmail-Thread-Id': escrow.threadIdHex,
+          },
+        });
+      }
+
       router.replace('/inbox');
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : 'Failed to send email');
@@ -280,15 +296,27 @@ export default function ComposeScreen() {
             <Text style={styles.prefillText}>Loading recipients…</Text>
           </View>
         )}
-        <View style={styles.walletRow}>
-          <Text style={styles.walletText}>
-            Wallet: {account ? `${account.publicKey.toBase58().slice(0, 4)}...${account.publicKey.toBase58().slice(-4)}` : 'Not connected'}
+        {isReply ? (
+          <Text style={styles.replyNote}>
+            Replies do not create a new on-chain escrow; only new outgoing mail requires a wallet
+            signature and devnet SOL.
           </Text>
-          <Pressable style={styles.walletButton} onPress={() => void connect()}>
-            <Text style={styles.walletButtonText}>{account ? 'Reconnect' : 'Connect'}</Text>
-          </Pressable>
-        </View>
-        {!!balanceLabel && <Text style={styles.balance}>{balanceLabel}</Text>}
+        ) : (
+          <>
+            <View style={styles.walletRow}>
+              <Text style={styles.walletText}>
+                Wallet:{' '}
+                {account
+                  ? `${account.publicKey.toBase58().slice(0, 4)}...${account.publicKey.toBase58().slice(-4)}`
+                  : 'Not connected'}
+              </Text>
+              <Pressable style={styles.walletButton} onPress={() => void connect()}>
+                <Text style={styles.walletButtonText}>{account ? 'Reconnect' : 'Connect'}</Text>
+              </Pressable>
+            </View>
+            {!!balanceLabel && <Text style={styles.balance}>{balanceLabel}</Text>}
+          </>
+        )}
         <TextInput
           value={to}
           onChangeText={setTo}
@@ -352,6 +380,7 @@ const styles = StyleSheet.create({
   form: { padding: 14, gap: 10 },
   prefillRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   prefillText: { color: '#9fb6d6', fontSize: 13 },
+  replyNote: { color: '#9fb6d6', fontSize: 12, lineHeight: 17 },
   walletRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   walletText: { color: '#d7dbe3', fontSize: 12 },
   walletButton: {
