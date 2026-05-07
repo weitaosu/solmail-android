@@ -3,9 +3,10 @@
   "main": "./index.js",
   "version": "1.0.0",
   "scripts": {
-    "start": "expo start",
+    "adb:reverse": "adb reverse tcp:3000 tcp:3000 && adb reverse tcp:8787 tcp:8787 && adb reverse tcp:8081 tcp:8081",
+    "start": "pnpm adb:reverse && expo start",
     "reset-project": "node ./scripts/reset-project.js",
-    "android": "expo run:android",
+    "android": "pnpm adb:reverse && expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
     "lint": "expo lint"

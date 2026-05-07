@@ -31,7 +31,17 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
+.env.local
 .env*.local
+
+# IDE
+.idea/
+.vscode/
+
+# pnpm uses pnpm-lock.yaml — npm/yarn lockfiles shouldn't be committed
+package-lock.json
+yarn.lock
 
 # typescript
 *.tsbuildinfo
