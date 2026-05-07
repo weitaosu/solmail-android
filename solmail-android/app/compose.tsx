@@ -21,55 +21,122 @@ function parseRecipients(input: string) {
 }
 
 type ReplySourceMessage = {
-  sender: { email: string };
+  sender: { email?: string };
   replyTo?: string;
   to: { email: string }[];
   cc?: { email: string }[] | null;
   bcc?: { email: string }[] | null;
 };
 
-/** Matches web EmailComposer replyAll semantics (excluding current user addresses). */
-function buildReplyAllRecipients(latest: ReplySourceMessage, userEmailRaw: string) {
-  const userEmail = userEmailRaw.trim().toLowerCase();
-  const senderEmail = latest.sender.email.trim().toLowerCase();
+/** Parse first email from Reply-To header (may be "Name <a@b>" or comma-separated list). */
+function firstEmailFromHeader(raw?: string | null): string | null {
+  if (!raw?.trim()) return null;
+  const segments = raw.split(',');
+  for (const segment of segments) {
+    const t = segment.trim();
+    if (!t) continue;
+    const angle = /<([^<>]+)>/.exec(t);
+    const inner = angle?.[1]?.trim().replace(/^mailto:/i, '');
+    if (inner?.includes('@')) return inner.replace(/,$/, '').trim();
+    const bare = t.replace(/^mailto:/i, '').replace(/^[('"]+|[)'"]+$/g, '').trim();
+    const at = bare.match(/[^\s<>]+@[^\s<>]+/);
+    if (at?.[0]) return at[0].replace(/,$/, '');
+  }
+  return null;
+}
+
+function normEmail(email: string) {
+  return email.trim().toLowerCase().replace(/^mailto:/i, '');
+}
+
+function addToDeduped(bucket: string[], email: string) {
+  const n = normEmail(email);
+  if (!n.includes('@')) return;
+  if (bucket.some((x) => normEmail(x) === n)) return;
+  bucket.push(email.trim());
+}
+
+type ThreadLikeMessage = ReplySourceMessage & { receivedOn?: string };
+
+/** Reply-all excluding current account; respondent (reply-to → sender) is always on To when they're not you. */
+function buildReplyAllRecipients(
+  latest: ReplySourceMessage,
+  userEmailRaw: string,
+  allMessagesDescending?: ThreadLikeMessage[],
+) {
+  const userEmail = normEmail(userEmailRaw);
+  const structuredSender = latest.sender?.email?.trim() ?? '';
+  const senderNorm = structuredSender ? normEmail(structuredSender) : '';
+  const replyParsed = firstEmailFromHeader(latest.replyTo ?? null);
+
+  /** Who this message is ultimately from — avoid double-listing respondent vs To line. */
+  const respondentNorm = replyParsed ? normEmail(replyParsed) : senderNorm;
+  const respondentDisplay =
+    replyParsed ??
+    (structuredSender.includes('@')
+      ? structuredSender
+      : firstEmailFromHeader(structuredSender) ?? structuredSender);
+
   const to: string[] = [];
   const cc: string[] = [];
   const bcc: string[] = [];
 
-  if (senderEmail !== userEmail) {
-    const primary = (latest.replyTo?.trim() || latest.sender.email).trim();
-    if (primary) to.push(primary);
+  const shouldAddRespondent =
+    respondentDisplay &&
+    respondentNorm &&
+    respondentNorm !== userEmail;
+
+  if (shouldAddRespondent) {
+    addToDeduped(to, respondentDisplay);
   }
 
   for (const recipient of latest.to ?? []) {
     const email = recipient?.email?.trim();
     if (!email) continue;
-    const normalized = email.toLowerCase();
-    if (normalized === userEmail || normalized === senderEmail) continue;
-    if (!to.some((t) => t.toLowerCase() === normalized)) to.push(email);
+    const normalized = normEmail(email);
+    if (normalized === userEmail) continue;
+    if (respondentNorm && normalized === respondentNorm) continue;
+    if (!to.some((t) => normEmail(t) === normalized)) addToDeduped(to, email);
   }
 
   for (const recipient of latest.cc ?? []) {
     const email = recipient?.email?.trim();
     if (!email) continue;
-    const normalized = email.toLowerCase();
+    const normalized = normEmail(email);
     if (normalized === userEmail) continue;
-    if (to.some((t) => t.toLowerCase() === normalized)) continue;
-    if (!cc.some((c) => c.toLowerCase() === normalized)) cc.push(email);
+    if (respondentNorm && normalized === respondentNorm) continue;
+    if (to.some((t) => normEmail(t) === normalized)) continue;
+    if (!cc.some((c) => normEmail(c) === normalized)) addToDeduped(cc, email);
   }
 
   for (const recipient of latest.bcc ?? []) {
     const email = recipient?.email?.trim();
     if (!email) continue;
-    const normalized = email.toLowerCase();
+    const normalized = normEmail(email);
     if (normalized === userEmail) continue;
-    if (
-      to.some((t) => t.toLowerCase() === normalized) ||
-      cc.some((c) => c.toLowerCase() === normalized)
-    ) {
+    if (respondentNorm && normalized === respondentNorm) continue;
+    if (to.some((t) => normEmail(t) === normalized) || cc.some((c) => normEmail(c) === normalized)) {
       continue;
     }
-    bcc.push(email);
+    addToDeduped(bcc, email);
+  }
+
+  /** Latest message outbound-only / stripped To lines — use newest inbound peer as respondent. */
+  if (to.length === 0 && allMessagesDescending?.length) {
+    const ts = (m: ThreadLikeMessage) => {
+      const t = new Date(m.receivedOn ?? '').getTime();
+      return Number.isFinite(t) ? t : 0;
+    };
+    const desc = [...allMessagesDescending].sort((a, b) => ts(b) - ts(a));
+    for (const m of desc) {
+      const replyFirst = firstEmailFromHeader(m.replyTo ?? null);
+      const structured = m.sender?.email?.trim() ?? '';
+      const respondent = replyFirst ?? structured;
+      const sn = normEmail(respondent);
+      if (!sn.includes('@') || sn === userEmail) continue;
+      addToDeduped(to, respondent.trim());
+      break;
+    }
   }
 
   return { to, cc, bcc };
@@ -118,13 +185,12 @@ export default function ComposeScreen() {
         if (cancelled || !connection?.email) return;
 
         const messages = thread.messages ?? [];
-        let latest =
-          thread.latest ??
-          [...messages].sort((a, b) => {
-            const da = new Date(a.receivedOn || 0).getTime();
-            const db = new Date(b.receivedOn || 0).getTime();
-            return db - da;
-          })[0];
+        const descSorted = [...messages].sort((a, b) => {
+          const da = new Date((a as { receivedOn?: string }).receivedOn || 0).getTime();
+          const db = new Date((b as { receivedOn?: string }).receivedOn || 0).getTime();
+          return db - da;
+        });
+        const latest = thread.latest ?? descSorted[0];
 
         if (!latest) {
           setError('Could not load thread to reply.');
@@ -134,6 +200,7 @@ export default function ComposeScreen() {
         const { to: toList, cc: ccList, bcc: bccList } = buildReplyAllRecipients(
           latest as ReplySourceMessage,
           connection.email,
+          descSorted as ThreadLikeMessage[],
         );
         setTo(toList.join(', '));
         setCc(ccList.join(', '));
