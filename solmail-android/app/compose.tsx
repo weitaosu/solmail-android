@@ -1,7 +1,19 @@
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { trpc } from '@/src/api/trpc';
+import { Feather } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
 import {
   Connection,
   LAMPORTS_PER_SOL,
@@ -11,6 +23,58 @@ import {
   TransactionInstruction,
 } from '@solana/web3.js';
 import { useMobileWallet } from '@/src/wallet/mobile-wallet-provider';
+import { trpc } from '@/src/api/trpc';
+import { Avatar } from '@/components/ui/avatar';
+import { Chip } from '@/components/ui/chip';
+import { palette } from '@/constants/colors';
+
+/** Anchor `register_and_claim` discriminator: sha256("global:register_and_claim")[0:8]. */
+const REGISTER_AND_CLAIM_DISCRIMINATOR = Uint8Array.from([
+  127, 144, 210, 98, 66, 165, 255, 139,
+]);
+/** 8 disc + Escrow account fields; status byte sits at index 128. */
+const ESCROW_MIN_DATA_LEN = 130;
+const ESCROW_STATUS_PENDING = 0;
+
+type EscrowMeta = { senderPubkey: string; threadIdHex: string };
+
+function getHeaderInsensitive(headers: Record<string, string> | undefined, canonical: string) {
+  if (!headers) return undefined;
+  const want = canonical.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === want && typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return undefined;
+}
+
+/** First message in the thread carrying SolMail escrow headers (for reply settlement). */
+function findSolmailEscrowHeaders(messages: unknown[]): EscrowMeta | null {
+  for (const msg of messages) {
+    const h = (msg as { headers?: Record<string, string> }).headers;
+    const tid = getHeaderInsensitive(h, 'X-Solmail-Thread-Id');
+    const spk = getHeaderInsensitive(h, 'X-Solmail-Sender-Pubkey');
+    if (!tid || !spk) continue;
+    const hex = tid.replace(/^0x/i, '').trim();
+    if (!/^[0-9a-fA-F]{64}$/.test(hex)) continue;
+    try {
+      new PublicKey(spk.trim());
+    } catch {
+      continue;
+    }
+    return { threadIdHex: hex.toLowerCase(), senderPubkey: spk.trim() };
+  }
+  return null;
+}
+
+function threadIdHexToBytes(hex: string): Uint8Array | null {
+  const clean = hex.trim().toLowerCase().replace(/^0x/, '');
+  if (!/^[0-9a-f]{64}$/.test(clean)) return null;
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
 
 function parseRecipients(input: string) {
   return input
@@ -18,6 +82,93 @@ function parseRecipients(input: string) {
     .map((value) => value.trim())
     .filter(Boolean)
     .map((email) => ({ email }));
+}
+
+function recipientTokens(input: string): string[] {
+  return input
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** Strip "Name <email>" → email-only label for a chip; fall back to raw token. */
+function chipLabel(token: string): string {
+  const angle = /<([^<>]+)>/.exec(token);
+  if (angle?.[1]) return angle[1].trim();
+  return token;
+}
+
+/** Strip HTML tags and normalize whitespace into a plain-text quote body. */
+function htmlToPlain(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li)>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** Prefix every line of the source with `> ` for plain-text reply quoting. */
+function quoteLines(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => (line.length ? `> ${line}` : '>'))
+    .join('\n');
+}
+
+/** Build the Gmail-web "Forwarded message" trailer to seed the body. */
+function buildForwardBody(args: {
+  fromName: string;
+  fromEmail: string;
+  date: string;
+  subject: string;
+  toList: string[];
+  decodedBody: string;
+}): string {
+  const dateLabel = args.date ? new Date(args.date).toLocaleString() : '';
+  const fromLine = args.fromEmail
+    ? `${args.fromName} <${args.fromEmail}>`
+    : args.fromName || '(unknown)';
+  const toLine = args.toList.length ? args.toList.join(', ') : '—';
+  const trailer =
+    `\n\n---------- Forwarded message ----------\n` +
+    `From: ${fromLine}\n` +
+    (dateLabel ? `Date: ${dateLabel}\n` : '') +
+    `Subject: ${args.subject || '(no subject)'}\n` +
+    `To: ${toLine}\n\n` +
+    htmlToPlain(args.decodedBody);
+  return trailer;
+}
+
+/**
+ * Gmail-style reply quote: empty space for the user, then a one-line
+ * "On <date>, <name> <email> wrote:" lead-in, then the original body
+ * with each line prefixed by `> `.
+ */
+function buildReplyBody(args: {
+  fromName: string;
+  fromEmail: string;
+  date: string;
+  decodedBody: string;
+}): string {
+  const dateLabel = args.date ? new Date(args.date).toLocaleString() : '';
+  const fromLabel = args.fromEmail
+    ? `${args.fromName} <${args.fromEmail}>`
+    : args.fromName || '(unknown sender)';
+  const lead = dateLabel
+    ? `On ${dateLabel}, ${fromLabel} wrote:`
+    : `${fromLabel} wrote:`;
+  const quoted = quoteLines(htmlToPlain(args.decodedBody));
+  // Three leading newlines = two visibly empty lines before the quote header,
+  // making it clear that the user's reply belongs at the very top.
+  return `\n\n\n${lead}\n${quoted}\n`;
 }
 
 type ReplySourceMessage = {
@@ -69,7 +220,6 @@ function buildReplyAllRecipients(
   const senderNorm = structuredSender ? normEmail(structuredSender) : '';
   const replyParsed = firstEmailFromHeader(latest.replyTo ?? null);
 
-  /** Who this message is ultimately from — avoid double-listing respondent vs To line. */
   const respondentNorm = replyParsed ? normEmail(replyParsed) : senderNorm;
   const respondentDisplay =
     replyParsed ??
@@ -82,13 +232,8 @@ function buildReplyAllRecipients(
   const bcc: string[] = [];
 
   const shouldAddRespondent =
-    respondentDisplay &&
-    respondentNorm &&
-    respondentNorm !== userEmail;
-
-  if (shouldAddRespondent) {
-    addToDeduped(to, respondentDisplay);
-  }
+    respondentDisplay && respondentNorm && respondentNorm !== userEmail;
+  if (shouldAddRespondent) addToDeduped(to, respondentDisplay);
 
   for (const recipient of latest.to ?? []) {
     const email = recipient?.email?.trim();
@@ -98,7 +243,6 @@ function buildReplyAllRecipients(
     if (respondentNorm && normalized === respondentNorm) continue;
     if (!to.some((t) => normEmail(t) === normalized)) addToDeduped(to, email);
   }
-
   for (const recipient of latest.cc ?? []) {
     const email = recipient?.email?.trim();
     if (!email) continue;
@@ -108,7 +252,6 @@ function buildReplyAllRecipients(
     if (to.some((t) => normEmail(t) === normalized)) continue;
     if (!cc.some((c) => normEmail(c) === normalized)) addToDeduped(cc, email);
   }
-
   for (const recipient of latest.bcc ?? []) {
     const email = recipient?.email?.trim();
     if (!email) continue;
@@ -121,7 +264,6 @@ function buildReplyAllRecipients(
     addToDeduped(bcc, email);
   }
 
-  /** Latest message outbound-only / stripped To lines — use newest inbound peer as respondent. */
   if (to.length === 0 && allMessagesDescending?.length) {
     const ts = (m: ThreadLikeMessage) => {
       const t = new Date(m.receivedOn ?? '').getTime();
@@ -142,97 +284,56 @@ function buildReplyAllRecipients(
   return { to, cc, bcc };
 }
 
-function getHeaderInsensitive(headers: Record<string, string> | undefined, canonical: string) {
-  if (!headers) return undefined;
-  const want = canonical.toLowerCase();
-  for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() === want && typeof v === 'string' && v.trim()) return v.trim();
-  }
-  return undefined;
-}
-
-/** First message in the thread that carries SolMail escrow headers (for reply settlement). */
-function findSolmailEscrowHeaders(
-  messages: unknown[],
-): { threadIdHex: string; senderPubkey: string } | null {
-  for (const msg of messages) {
-    const h = (msg as { headers?: Record<string, string> }).headers;
-    const tid = getHeaderInsensitive(h, 'X-Solmail-Thread-Id');
-    const spk = getHeaderInsensitive(h, 'X-Solmail-Sender-Pubkey');
-    if (!tid || !spk) continue;
-    const hex = tid.replace(/^0x/i, '').trim();
-    if (!/^[0-9a-fA-F]{64}$/.test(hex)) continue;
-    try {
-      new PublicKey(spk.trim());
-    } catch {
-      continue;
-    }
-    return { threadIdHex: hex.toLowerCase(), senderPubkey: spk.trim() };
-  }
-  return null;
-}
-
-function threadIdHexToBytes(hex: string): Uint8Array | null {
-  const clean = hex.trim().toLowerCase().replace(/^0x/, '');
-  if (!/^[0-9a-f]{64}$/.test(clean)) return null;
-  const out = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) {
-    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-  }
-  return out;
-}
-
-/** Escrow account data: 8 disc + Escrow; status enum at byte index 128. */
-const ESCROW_MIN_DATA_LEN = 130;
-const ESCROW_STATUS_PENDING = 0;
-
-/** Anchor `register_and_claim` discriminator (sha256("global:register_and_claim")[0:8]). */
-const REGISTER_AND_CLAIM_DISCRIMINATOR = Uint8Array.from([127, 144, 210, 98, 66, 165, 255, 139]);
-
-async function isEscrowPdaPending(
-  meta: { threadIdHex: string; senderPubkey: string },
-  programId: PublicKey,
-  rpc: string,
-): Promise<boolean> {
-  const threadBytes = threadIdHexToBytes(meta.threadIdHex);
-  if (!threadBytes) return false;
-  try {
-    const senderPk = new PublicKey(meta.senderPubkey);
-    const connection = new Connection(rpc, 'confirmed');
-    const [escrowPda] = PublicKey.findProgramAddressSync(
-      [new TextEncoder().encode('escrow'), senderPk.toBuffer(), threadBytes],
-      programId,
-    );
-    const info = await connection.getAccountInfo(escrowPda, 'confirmed');
-    if (!info?.owner.equals(programId) || info.data.length < ESCROW_MIN_DATA_LEN) return false;
-    return info.data[128] === ESCROW_STATUS_PENDING;
-  } catch {
-    return false;
-  }
-}
-
 export default function ComposeScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ replyThread?: string }>();
+  const params = useLocalSearchParams<{
+    replyThread?: string;
+    replyMode?: string;
+    forwardThread?: string;
+  }>();
   const replyThreadRaw = params.replyThread;
+  const forwardThreadRaw = params.forwardThread;
   const replyThreadId =
     typeof replyThreadRaw === 'string' ? replyThreadRaw : replyThreadRaw?.[0];
-  /** Replies reuse the Gmail thread; only brand-new mails init on-chain escrow (matches web composer). */
+  const forwardThreadId =
+    typeof forwardThreadRaw === 'string' ? forwardThreadRaw : forwardThreadRaw?.[0];
+  const replyModeParam =
+    typeof params.replyMode === 'string' ? params.replyMode : params.replyMode?.[0];
+  const replyOnly = replyThreadId && replyModeParam !== 'replyAll';
   const isReply = Boolean(replyThreadId);
+  const isForward = Boolean(forwardThreadId);
+  const composeMode: 'new' | 'reply' | 'replyAll' | 'forward' = isForward
+    ? 'forward'
+    : isReply
+      ? replyOnly
+        ? 'reply'
+        : 'replyAll'
+      : 'new';
 
-  const { account, connect, signAndSendTransactions } = useMobileWallet();
-  const [to, setTo] = useState('');
-  const [cc, setCc] = useState('');
-  const [bcc, setBcc] = useState('');
+  const [toChips, setToChips] = useState<string[]>([]);
+  const [ccChips, setCcChips] = useState<string[]>([]);
+  const [bccChips, setBccChips] = useState<string[]>([]);
+  const [toDraft, setToDraft] = useState('');
+  const [ccDraft, setCcDraft] = useState('');
+  const [bccDraft, setBccDraft] = useState('');
+  const [showCcBcc, setShowCcBcc] = useState(false);
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
+  const [bodySelection, setBodySelection] = useState<{ start: number; end: number } | undefined>(
+    undefined,
+  );
   const [sending, setSending] = useState(false);
+  const [sendStatus, setSendStatus] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
-  const [balanceLabel, setBalanceLabel] = useState('');
   const [replyPrefilling, setReplyPrefilling] = useState(false);
+  const [fromEmail, setFromEmail] = useState<string>('');
 
-  const MIN_DEVNET_SOL = 0.000001;
+  const replyEscrowMetaRef = useRef<EscrowMeta | null>(null);
+  const { account, connect, signAndSendTransactions } = useMobileWallet();
+  /** 0.0000001 SOL per email — tiny test amount on devnet. */
   const ESCROW_AMOUNT_SOL = 0.0000001;
+  /** Floor balance the user's wallet must hold to pay escrow rent + fee. */
+  const MIN_DEVNET_SOL = 0.000001;
   const rpcUrl = process.env.EXPO_PUBLIC_SOLANA_RPC_URL || 'https://api.devnet.solana.com';
   const chain = process.env.EXPO_PUBLIC_SOLANA_CHAIN || 'solana:devnet';
   const escrowProgramId = new PublicKey(
@@ -240,105 +341,50 @@ export default function ComposeScreen() {
   );
   const INIT_ESCROW_DISCRIMINATOR = Uint8Array.from([243, 160, 77, 153, 11, 92, 48, 209]);
 
-  const [replyEscrowHeaders, setReplyEscrowHeaders] = useState<{
-    threadIdHex: string;
-    senderPubkey: string;
-  } | null>(null);
-  /** null = still checking RPC when headers exist */
-  const [replyEscrowPending, setReplyEscrowPending] = useState<boolean | null>(false);
-
-  useEffect(() => {
-    if (!replyThreadId) {
-      setReplyEscrowHeaders(null);
-      setReplyEscrowPending(false);
-      return;
+  /**
+   * Verify the user's main wallet (MWA) is authorized and has enough SOL,
+   * triggering Seed Vault / Phantom auth on first call. Every escrow tx
+   * signs through this wallet — popup per send is expected.
+   */
+  const ensureWalletWithSol = async () => {
+    const activeAccount = account || (await connect());
+    if (!chain.includes('devnet')) {
+      throw new Error('Compose is restricted to devnet wallet flow right now.');
     }
-    let cancelled = false;
-    (async () => {
-      try {
-        setReplyPrefilling(true);
-        setError(null);
-        const [connection, thread] = await Promise.all([
-          trpc.connections.getDefault.query(),
-          trpc.mail.get.query({ id: replyThreadId, forceFresh: false }),
-        ]);
-        if (cancelled || !connection?.email) return;
-
-        const messages = thread.messages ?? [];
-        const escrowMeta = findSolmailEscrowHeaders(messages);
-        setReplyEscrowHeaders(escrowMeta);
-        if (!escrowMeta) {
-          setReplyEscrowPending(false);
-        } else {
-          setReplyEscrowPending(null);
-          const pending = await isEscrowPdaPending(escrowMeta, escrowProgramId, rpcUrl);
-          if (!cancelled) setReplyEscrowPending(pending);
-        }
-        const descSorted = [...messages].sort((a, b) => {
-          const da = new Date((a as { receivedOn?: string }).receivedOn || 0).getTime();
-          const db = new Date((b as { receivedOn?: string }).receivedOn || 0).getTime();
-          return db - da;
-        });
-        const latest = thread.latest ?? descSorted[0];
-
-        if (!latest) {
-          setError('Could not load thread to reply.');
-          return;
-        }
-
-        const { to: toList, cc: ccList, bcc: bccList } = buildReplyAllRecipients(
-          latest as ReplySourceMessage,
-          connection.email,
-          descSorted as ThreadLikeMessage[],
-        );
-        setTo(toList.join(', '));
-        setCc(ccList.join(', '));
-        setBcc(bccList.join(', '));
-
-        const subj = (latest.subject || '').trim() || '(no subject)';
-        setSubject(subj.toLowerCase().startsWith('re:') ? subj : `Re: ${subj}`);
-      } catch (replyErr) {
-        if (!cancelled) {
-          setError(replyErr instanceof Error ? replyErr.message : 'Failed to load reply');
-        }
-      } finally {
-        if (!cancelled) setReplyPrefilling(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [replyThreadId]);
+    const connection = new Connection(rpcUrl, 'processed');
+    const lamports = await connection.getBalance(activeAccount.publicKey);
+    const balanceSol = lamports / LAMPORTS_PER_SOL;
+    if (balanceSol < MIN_DEVNET_SOL) {
+      throw new Error(
+        `Need at least ${MIN_DEVNET_SOL} SOL on devnet to send. Wallet balance: ${balanceSol.toFixed(6)} SOL.`,
+      );
+    }
+    return activeAccount;
+  };
 
   /**
-   * If SolMail headers exist and the escrow PDA is still pending, connect wallet and
-   * sign `register_and_claim`. No-op if already claimed or account missing.
+   * Sign + broadcast register_and_claim if the thread carries SolMail
+   * headers AND the PDA is still pending. Pops the user's wallet for
+   * a biometric/PIN approval — claimed lamports land in the wallet
+   * via Anchor's `close = receiver`.
    */
   const claimReplyEscrowIfPending = async () => {
-    if (!replyEscrowHeaders) return;
-    const threadBytes = threadIdHexToBytes(replyEscrowHeaders.threadIdHex);
-    if (!threadBytes) {
-      throw new Error('Invalid X-Solmail-Thread-Id from thread headers.');
-    }
-    const senderPk = new PublicKey(replyEscrowHeaders.senderPubkey);
+    const meta = replyEscrowMetaRef.current;
+    if (!meta) return;
+    const threadBytes = threadIdHexToBytes(meta.threadIdHex);
+    if (!threadBytes) throw new Error('Invalid X-Solmail-Thread-Id header.');
+    const senderPk = new PublicKey(meta.senderPubkey);
     const connection = new Connection(rpcUrl, 'confirmed');
     const [escrowPda] = PublicKey.findProgramAddressSync(
       [new TextEncoder().encode('escrow'), senderPk.toBuffer(), threadBytes],
       escrowProgramId,
     );
     const info = await connection.getAccountInfo(escrowPda, 'confirmed');
-    if (!info || !info.owner.equals(escrowProgramId)) {
-      return;
-    }
-    if (info.data.length < ESCROW_MIN_DATA_LEN) {
-      throw new Error('Escrow account data is invalid.');
-    }
-    if (info.data[128] !== ESCROW_STATUS_PENDING) {
-      return;
-    }
+    if (!info || !info.owner.equals(escrowProgramId)) return;
+    if (info.data.length < ESCROW_MIN_DATA_LEN) throw new Error('Escrow account data is invalid.');
+    if (info.data[128] !== ESCROW_STATUS_PENDING) return;
 
     const receiver = (await ensureWalletWithSol()).publicKey;
-
     const data = new Uint8Array(8 + 32 + 32);
     data.set(REGISTER_AND_CLAIM_DISCRIMINATOR, 0);
     data.set(senderPk.toBuffer(), 8);
@@ -353,47 +399,30 @@ export default function ComposeScreen() {
       ],
       data,
     });
-
     const tx = new Transaction().add(ix);
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
     tx.recentBlockhash = blockhash;
     tx.feePayer = receiver;
-
     const signatures = await signAndSendTransactions([tx]);
     const signature = signatures[0];
-    if (!signature) {
-      throw new Error('No claim transaction signature returned by wallet.');
-    }
-
+    if (!signature) throw new Error('No claim transaction signature returned by wallet.');
     await connection.confirmTransaction(
       { signature, blockhash, lastValidBlockHeight },
       'confirmed',
     );
   };
 
-  const ensureWalletWithSol = async () => {
-    const activeAccount = account || (await connect());
-    if (!chain.includes('devnet')) {
-      throw new Error('Compose is restricted to devnet wallet flow right now.');
-    }
-    const connection = new Connection(rpcUrl, 'processed');
-    const lamports = await connection.getBalance(activeAccount.publicKey);
-    const balanceSol = lamports / LAMPORTS_PER_SOL;
-    setBalanceLabel(`${balanceSol.toFixed(6)} SOL`);
-    if (balanceSol < MIN_DEVNET_SOL) {
-      throw new Error(
-        `Need at least ${MIN_DEVNET_SOL} SOL on devnet to send with SolMail escrow. Current balance: ${balanceSol.toFixed(6)} SOL.`,
-      );
-    }
-    return activeAccount;
-  };
-
+  /**
+   * Initialize a fresh escrow PDA for an outgoing email, signed by the
+   * user's main wallet. Pops Seed Vault / Phantom — every send asks for
+   * approval. Returns the random thread_id hex + sender pubkey to set
+   * on email headers.
+   */
   const createEscrowForEmail = async (senderPubkey: PublicKey) => {
     const connection = new Connection(rpcUrl, 'confirmed');
     const threadIdBytes = new Uint8Array(32);
     crypto.getRandomValues(threadIdBytes);
     const amountLamports = BigInt(Math.floor(ESCROW_AMOUNT_SOL * LAMPORTS_PER_SOL));
-
     const [escrowPda] = PublicKey.findProgramAddressSync(
       [new TextEncoder().encode('escrow'), senderPubkey.toBuffer(), threadIdBytes],
       escrowProgramId,
@@ -413,18 +442,13 @@ export default function ComposeScreen() {
       ],
       data,
     });
-
     const tx = new Transaction().add(ix);
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
     tx.recentBlockhash = blockhash;
     tx.feePayer = senderPubkey;
-
     const signatures = await signAndSendTransactions([tx]);
     const signature = signatures[0];
-    if (!signature) {
-      throw new Error('No escrow transaction signature returned by wallet.');
-    }
-
+    if (!signature) throw new Error('No escrow transaction signature returned by wallet.');
     await connection.confirmTransaction(
       { signature, blockhash, lastValidBlockHeight },
       'confirmed',
@@ -434,11 +458,9 @@ export default function ComposeScreen() {
     if (!escrowAccount || !escrowAccount.owner.equals(escrowProgramId)) {
       throw new Error('Escrow account was not created on-chain.');
     }
-
     const threadIdHex = Array.from(threadIdBytes)
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
-
     return {
       signature,
       threadIdHex,
@@ -446,220 +468,580 @@ export default function ComposeScreen() {
     };
   };
 
+  /** Add a chip from the in-progress draft (called on comma/blur/submit). */
+  const commitDraft = (
+    chips: string[],
+    setChips: (v: string[]) => void,
+    draft: string,
+    setDraft: (v: string) => void,
+  ) => {
+    const tokens = recipientTokens(draft);
+    if (!tokens.length) {
+      setDraft('');
+      return;
+    }
+    const merged = [...chips];
+    for (const t of tokens) {
+      if (!merged.some((x) => x.toLowerCase() === t.toLowerCase())) merged.push(t);
+    }
+    setChips(merged);
+    setDraft('');
+  };
+
+  /** Detect a comma typed inside the draft and commit chips immediately. */
+  const handleDraftChange = (
+    chips: string[],
+    setChips: (v: string[]) => void,
+    setDraft: (v: string) => void,
+  ) => (text: string) => {
+    if (text.includes(',')) {
+      const parts = text.split(',');
+      const trailing = parts.pop() ?? '';
+      const tokens = parts.map((s) => s.trim()).filter(Boolean);
+      if (tokens.length) {
+        const merged = [...chips];
+        for (const t of tokens) {
+          if (!merged.some((x) => x.toLowerCase() === t.toLowerCase())) merged.push(t);
+        }
+        setChips(merged);
+      }
+      setDraft(trailing);
+    } else {
+      setDraft(text);
+    }
+  };
+
+  const removeChip = (
+    chips: string[],
+    setChips: (v: string[]) => void,
+    index: number,
+  ) => setChips(chips.filter((_, i) => i !== index));
+
+  const subjectInputRef = useRef<TextInput>(null);
+  const bodyInputRef = useRef<TextInput>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const conn = await trpc.connections.getDefault.query();
+        if (!cancelled && conn?.email) setFromEmail(conn.email);
+      } catch {
+        // From line is informational; silent failure is fine.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!replyThreadId && !forwardThreadId) return;
+    let cancelled = false;
+    const sourceThreadId = replyThreadId || forwardThreadId!;
+    (async () => {
+      try {
+        setReplyPrefilling(true);
+        setError(null);
+        const [connection, thread] = await Promise.all([
+          trpc.connections.getDefault.query().catch(() => null as { email?: string } | null),
+          trpc.mail.get.query({ id: sourceThreadId, forceFresh: false }),
+        ]);
+        if (cancelled) return;
+        // Missing connection email is non-fatal — proceed with empty self so
+        // recipient extraction still runs (no self-dedup, but at least chips
+        // populate). Previously this early-returned and left chips empty.
+        const userEmail = connection?.email ?? '';
+
+        const messages = thread.messages ?? [];
+        // Replies need escrow header lookup so we can claim on send.
+        replyEscrowMetaRef.current = isReply ? findSolmailEscrowHeaders(messages) : null;
+        const descSorted = [...messages].sort((a, b) => {
+          const da = new Date((a as { receivedOn?: string }).receivedOn || 0).getTime();
+          const db = new Date((b as { receivedOn?: string }).receivedOn || 0).getTime();
+          return db - da;
+        });
+        const latest = thread.latest ?? descSorted[0];
+        if (!latest) {
+          setError('Could not load thread.');
+          return;
+        }
+
+        const subj = (latest.subject || '').trim() || '(no subject)';
+
+        if (isForward) {
+          // Forward: clear recipients, prefix Fwd:, seed body with quoted original.
+          setToChips([]);
+          setCcChips([]);
+          setBccChips([]);
+          setShowCcBcc(false);
+          setSubject(subj.toLowerCase().startsWith('fwd:') ? subj : `Fwd: ${subj}`);
+          const sender = (latest as { sender?: { name?: string; email?: string } }).sender ?? {};
+          const toList =
+            ((latest as { to?: { name?: string; email?: string }[] }).to ?? [])
+              .map((r) => (r.name ? `${r.name} <${r.email ?? ''}>` : r.email || ''))
+              .filter(Boolean);
+          const decoded =
+            (latest as { decodedBody?: string; body?: string }).decodedBody ||
+            (latest as { decodedBody?: string; body?: string }).body ||
+            '';
+          setBody(
+            buildForwardBody({
+              fromName: sender.name || sender.email || 'Unknown',
+              fromEmail: sender.email || '',
+              date: (latest as { receivedOn?: string }).receivedOn || '',
+              subject: subj,
+              toList,
+              decodedBody: decoded,
+            }),
+          );
+        } else {
+          // Reply / Reply all
+          const all = buildReplyAllRecipients(
+            latest as ReplySourceMessage,
+            userEmail,
+            descSorted as ThreadLikeMessage[],
+          );
+
+          /**
+           * Hard fallback so the To chip never ends up empty: if the builder
+           * produced nothing (rare data shapes — outbound thread with no
+           * historical inbound, missing sender, etc.), fall back to the
+           * latest message's sender or first To recipient.
+           */
+          let toList = all.to;
+          if (toList.length === 0) {
+            const sender = (latest as { sender?: { email?: string } }).sender;
+            const firstTo = (latest as { to?: { email?: string }[] }).to?.[0];
+            const fallback = sender?.email || firstTo?.email;
+            if (fallback) toList = [fallback];
+          }
+
+          if (replyOnly) {
+            // Reply: just the respondent (first To from reply-all).
+            setToChips(toList.slice(0, 1));
+            setCcChips([]);
+            setBccChips([]);
+            setShowCcBcc(false);
+          } else {
+            setToChips(toList);
+            setCcChips(all.cc);
+            setBccChips(all.bcc);
+            if (all.cc.length || all.bcc.length) setShowCcBcc(true);
+          }
+
+          // Quote the original below an empty space (Gmail mobile pattern).
+          const sender = (latest as { sender?: { name?: string; email?: string } }).sender ?? {};
+          const decoded =
+            (latest as { decodedBody?: string; body?: string }).decodedBody ||
+            (latest as { decodedBody?: string; body?: string }).body ||
+            '';
+          setBody(
+            buildReplyBody({
+              fromName: sender.name || sender.email || 'Unknown',
+              fromEmail: sender.email || '',
+              date: (latest as { receivedOn?: string }).receivedOn || '',
+              decodedBody: decoded,
+            }),
+          );
+          setSubject(subj.toLowerCase().startsWith('re:') ? subj : `Re: ${subj}`);
+        }
+      } catch (loadErr) {
+        if (!cancelled) {
+          setError(loadErr instanceof Error ? loadErr.message : 'Failed to load thread');
+        }
+      } finally {
+        if (!cancelled) {
+          setReplyPrefilling(false);
+          /**
+           * Force the cursor to the top so the user types ABOVE the quoted
+           * history. setNativeProps was unreliable on Android — we now drive
+           * the position through the controlled `selection` prop and release
+           * it after a beat so the user can move the caret freely.
+           */
+          setBodySelection({ start: 0, end: 0 });
+          setTimeout(() => bodyInputRef.current?.focus(), 60);
+          setTimeout(() => setBodySelection(undefined), 600);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [replyThreadId, forwardThreadId, isForward, isReply, replyOnly]);
+
   const handleSend = async () => {
     try {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       setSending(true);
+      setSendStatus('');
       setError(null);
-      const recipients = parseRecipients(to);
-      const ccRecipients = parseRecipients(cc);
-      const bccRecipients = parseRecipients(bcc);
+      // Pull in any uncommitted text from each input as a final chip.
+      const flushedTo = recipientTokens([...toChips, toDraft].filter(Boolean).join(','));
+      const flushedCc = recipientTokens([...ccChips, ccDraft].filter(Boolean).join(','));
+      const flushedBcc = recipientTokens([...bccChips, bccDraft].filter(Boolean).join(','));
+      const recipients = parseRecipients(flushedTo.join(','));
+      const ccRecipients = parseRecipients(flushedCc.join(','));
+      const bccRecipients = parseRecipients(flushedBcc.join(','));
       if (!recipients.length) {
-        setError('Please add at least one recipient.');
+        setError('Add at least one recipient.');
         return;
       }
 
+      /**
+       * On-chain escrow step is signed by the user's main wallet via MWA —
+       * Seed Vault on Seeker, Phantom/Solflare elsewhere. Every send pops
+       * the wallet for biometric/PIN approval. New mail creates a fresh
+       * escrow PDA + sets X-Solmail-* headers; reply auto-claims any
+       * pending escrow PDA referenced in the thread headers (also a popup).
+       */
+      const headers: Record<string, string> = {};
+
       if (isReply) {
-        await claimReplyEscrowIfPending();
-        await trpc.mail.send.mutate({
-          to: recipients,
-          cc: ccRecipients.length ? ccRecipients : undefined,
-          bcc: bccRecipients.length ? bccRecipients : undefined,
-          subject: subject.trim() || '(no subject)',
-          message: body,
-          attachments: [],
-          threadId: replyThreadId,
-          headers: {},
-        });
+        if (replyEscrowMetaRef.current) {
+          setSendStatus('Sign claim in wallet…');
+          await claimReplyEscrowIfPending();
+        }
       } else {
+        setSendStatus('Sign escrow in wallet…');
         const activeAccount = await ensureWalletWithSol();
         const escrow = await createEscrowForEmail(activeAccount.publicKey);
-        await trpc.mail.send.mutate({
-          to: recipients,
-          cc: ccRecipients.length ? ccRecipients : undefined,
-          bcc: bccRecipients.length ? bccRecipients : undefined,
-          subject: subject.trim() || '(no subject)',
-          message: body,
-          attachments: [],
-          headers: {
-            'X-Solmail-Sender-Pubkey': escrow.senderPubkey,
-            'X-Solmail-Thread-Id': escrow.threadIdHex,
-          },
-        });
+        headers['X-Solmail-Sender-Pubkey'] = escrow.senderPubkey;
+        headers['X-Solmail-Thread-Id'] = escrow.threadIdHex;
       }
+
+      setSendStatus('Sending…');
+      await trpc.mail.send.mutate({
+        to: recipients,
+        cc: ccRecipients.length ? ccRecipients : undefined,
+        bcc: bccRecipients.length ? bccRecipients : undefined,
+        subject: subject.trim() || '(no subject)',
+        message: body,
+        attachments: [],
+        ...(isReply ? { threadId: replyThreadId } : {}),
+        headers,
+      });
 
       router.replace('/inbox');
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : 'Failed to send email');
     } finally {
       setSending(false);
+      setSendStatus('');
     }
   };
 
-  return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <Pressable onPress={() => router.back()}>
-          <Text style={styles.headerAction}>Cancel</Text>
-        </Pressable>
-        <Text style={styles.title}>{replyThreadId ? 'Reply all' : 'New email'}</Text>
-        <Pressable
-          onPress={handleSend}
-          disabled={
-            sending ||
-            replyPrefilling ||
-            (isReply && !!replyEscrowHeaders && replyEscrowPending === null)
-          }
-        >
-          {sending ? <ActivityIndicator size="small" color="#ffffff" /> : <Text style={styles.headerAction}>Send</Text>}
-        </Pressable>
-      </View>
+  const headerTitle =
+    composeMode === 'reply'
+      ? 'Reply'
+      : composeMode === 'replyAll'
+        ? 'Reply all'
+        : composeMode === 'forward'
+          ? 'Forward'
+          : 'Compose';
+  const sendDisabled = sending || replyPrefilling;
 
-      <ScrollView contentContainerStyle={styles.form}>
-        {replyPrefilling && (
-          <View style={styles.prefillRow}>
-            <ActivityIndicator size="small" color="#6b9ef5" />
-            <Text style={styles.prefillText}>Loading recipients…</Text>
+  return (
+    <SafeAreaView style={styles.shell} edges={['top']}>
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <View style={styles.header}>
+          <Pressable hitSlop={10} onPress={() => router.back()} style={styles.headerIcon}>
+            <Feather name="x" size={22} color={palette.textSecondary} />
+          </Pressable>
+          <View style={styles.titleWrap}>
+            <Text style={styles.title}>{headerTitle}</Text>
+            {!!sendStatus && <Text style={styles.sendStatus}>{sendStatus}</Text>}
           </View>
-        )}
-        {isReply ? (
-          <>
-            <Text style={styles.replyNote}>
-              {!replyEscrowHeaders
-                ? 'No escrow headers on this thread — reply sends without signing. Only new mail creates escrow.'
-                : replyEscrowPending === null
-                  ? 'Checking whether on-chain escrow is still pending…'
-                  : replyEscrowPending
-                    ? 'Pending SolMail escrow on devnet — connect your wallet. Send will sign register_and_claim, then post the reply.'
-                    : 'Escrow for this thread is already settled (or missing on-chain). Reply sends without a wallet signature.'}
-            </Text>
-            {!!replyEscrowHeaders && replyEscrowPending === true && (
-              <>
-                <View style={styles.walletRow}>
-                  <Text style={styles.walletText}>
-                    Wallet:{' '}
-                    {account
-                      ? `${account.publicKey.toBase58().slice(0, 4)}...${account.publicKey.toBase58().slice(-4)}`
-                      : 'Not connected'}
-                  </Text>
-                  <Pressable style={styles.walletButton} onPress={() => void connect()}>
-                    <Text style={styles.walletButtonText}>{account ? 'Reconnect' : 'Connect'}</Text>
-                  </Pressable>
-                </View>
-                {!!balanceLabel && <Text style={styles.balance}>{balanceLabel}</Text>}
-              </>
+          <Pressable
+            hitSlop={10}
+            onPress={handleSend}
+            disabled={sendDisabled}
+            style={[styles.headerIcon, sendDisabled && styles.iconDisabled]}
+          >
+            {sending ? (
+              <ActivityIndicator size="small" color={palette.accentSoft} />
+            ) : (
+              <Feather name="send" size={20} color={palette.accentSoft} />
             )}
-          </>
-        ) : (
-          <>
-            <View style={styles.walletRow}>
-              <Text style={styles.walletText}>
-                Wallet:{' '}
-                {account
-                  ? `${account.publicKey.toBase58().slice(0, 4)}...${account.publicKey.toBase58().slice(-4)}`
-                  : 'Not connected'}
-              </Text>
-              <Pressable style={styles.walletButton} onPress={() => void connect()}>
-                <Text style={styles.walletButtonText}>{account ? 'Reconnect' : 'Connect'}</Text>
-              </Pressable>
+          </Pressable>
+        </View>
+
+        <ScrollView
+          contentContainerStyle={styles.form}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+        >
+          {replyPrefilling && (
+            <View style={styles.prefillRow}>
+              <ActivityIndicator size="small" color={palette.accentSoft} />
+              <Text style={styles.prefillText}>Loading recipients…</Text>
             </View>
-            {!!balanceLabel && <Text style={styles.balance}>{balanceLabel}</Text>}
-          </>
-        )}
-        <TextInput
-          value={to}
-          onChangeText={setTo}
-          placeholder="To (comma-separated emails)"
-          placeholderTextColor="#7f8898"
-          style={styles.input}
-          autoCapitalize="none"
-        />
-        <TextInput
-          value={cc}
-          onChangeText={setCc}
-          placeholder="Cc (optional)"
-          placeholderTextColor="#7f8898"
-          style={styles.input}
-          autoCapitalize="none"
-        />
-        <TextInput
-          value={bcc}
-          onChangeText={setBcc}
-          placeholder="Bcc (optional)"
-          placeholderTextColor="#7f8898"
-          style={styles.input}
-          autoCapitalize="none"
-        />
-        <TextInput
-          value={subject}
-          onChangeText={setSubject}
-          placeholder="Subject"
-          placeholderTextColor="#7f8898"
-          style={styles.input}
-        />
-        <TextInput
-          value={body}
-          onChangeText={setBody}
-          placeholder="Write your message..."
-          placeholderTextColor="#7f8898"
-          style={styles.body}
-          multiline
-          textAlignVertical="top"
-        />
-        {error && <Text style={styles.error}>{error}</Text>}
-      </ScrollView>
-    </View>
+          )}
+
+          {!!fromEmail && (
+            <View style={styles.fromRow}>
+              <Avatar seed={fromEmail} size={28} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fromLabel}>From</Text>
+                <Text style={styles.fromValue} numberOfLines={1}>
+                  {fromEmail}
+                </Text>
+              </View>
+            </View>
+          )}
+
+          <View style={styles.fieldRow}>
+            <Text style={styles.fieldLabel}>To</Text>
+            <View style={styles.fieldGrow}>
+              {toChips.length > 0 && (
+                <View style={styles.chipsWrap}>
+                  {toChips.map((token, i) => (
+                    <Chip
+                      key={`to-${i}-${token}`}
+                      label={chipLabel(token)}
+                      onRemove={() => removeChip(toChips, setToChips, i)}
+                    />
+                  ))}
+                </View>
+              )}
+              <TextInput
+                value={toDraft}
+                onChangeText={handleDraftChange(toChips, setToChips, setToDraft)}
+                onBlur={() => commitDraft(toChips, setToChips, toDraft, setToDraft)}
+                onSubmitEditing={() => commitDraft(toChips, setToChips, toDraft, setToDraft)}
+                placeholder={toChips.length === 0 ? 'Recipients' : 'Add recipient'}
+                placeholderTextColor={palette.textFaint}
+                style={styles.chipInput}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="email-address"
+                returnKeyType="done"
+                blurOnSubmit={false}
+              />
+            </View>
+            <Pressable
+              hitSlop={8}
+              onPress={() => setShowCcBcc((v) => !v)}
+              style={styles.ccToggle}
+            >
+              <Feather
+                name={showCcBcc ? 'chevron-up' : 'chevron-down'}
+                size={18}
+                color={palette.textMuted}
+              />
+            </Pressable>
+          </View>
+
+          {showCcBcc && (
+            <>
+              <View style={styles.fieldRow}>
+                <Text style={styles.fieldLabel}>Cc</Text>
+                <View style={styles.fieldGrow}>
+                  {ccChips.length > 0 && (
+                    <View style={styles.chipsWrap}>
+                      {ccChips.map((token, i) => (
+                        <Chip
+                          key={`cc-${i}-${token}`}
+                          label={chipLabel(token)}
+                          onRemove={() => removeChip(ccChips, setCcChips, i)}
+                        />
+                      ))}
+                    </View>
+                  )}
+                  <TextInput
+                    value={ccDraft}
+                    onChangeText={handleDraftChange(ccChips, setCcChips, setCcDraft)}
+                    onBlur={() => commitDraft(ccChips, setCcChips, ccDraft, setCcDraft)}
+                    onSubmitEditing={() => commitDraft(ccChips, setCcChips, ccDraft, setCcDraft)}
+                    placeholder={ccChips.length === 0 ? 'Add Cc' : ''}
+                    placeholderTextColor={palette.textFaint}
+                    style={styles.chipInput}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType="email-address"
+                    returnKeyType="done"
+                    blurOnSubmit={false}
+                  />
+                </View>
+              </View>
+              <View style={styles.fieldRow}>
+                <Text style={styles.fieldLabel}>Bcc</Text>
+                <View style={styles.fieldGrow}>
+                  {bccChips.length > 0 && (
+                    <View style={styles.chipsWrap}>
+                      {bccChips.map((token, i) => (
+                        <Chip
+                          key={`bcc-${i}-${token}`}
+                          label={chipLabel(token)}
+                          onRemove={() => removeChip(bccChips, setBccChips, i)}
+                        />
+                      ))}
+                    </View>
+                  )}
+                  <TextInput
+                    value={bccDraft}
+                    onChangeText={handleDraftChange(bccChips, setBccChips, setBccDraft)}
+                    onBlur={() => commitDraft(bccChips, setBccChips, bccDraft, setBccDraft)}
+                    onSubmitEditing={() => commitDraft(bccChips, setBccChips, bccDraft, setBccDraft)}
+                    placeholder={bccChips.length === 0 ? 'Add Bcc' : ''}
+                    placeholderTextColor={palette.textFaint}
+                    style={styles.chipInput}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType="email-address"
+                    returnKeyType="done"
+                    blurOnSubmit={false}
+                  />
+                </View>
+              </View>
+            </>
+          )}
+
+          <View style={styles.fieldRow}>
+            <TextInput
+              ref={subjectInputRef}
+              value={subject}
+              onChangeText={setSubject}
+              placeholder="Subject"
+              placeholderTextColor={palette.textFaint}
+              style={[styles.fieldInput, styles.subjectInput]}
+              returnKeyType="next"
+              onSubmitEditing={() => bodyInputRef.current?.focus()}
+            />
+          </View>
+
+          <TextInput
+            ref={bodyInputRef}
+            value={body}
+            onChangeText={setBody}
+            selection={bodySelection}
+            placeholder="Compose email"
+            placeholderTextColor={palette.textFaint}
+            style={styles.body}
+            multiline
+            textAlignVertical="top"
+          />
+
+          {error && (
+            <View style={styles.errorBanner}>
+              <Feather name="alert-circle" size={14} color={palette.danger} />
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          )}
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0b0d11' },
+  shell: { flex: 1, backgroundColor: palette.surface },
+  flex: { flex: 1 },
   header: {
-    paddingTop: 56,
-    paddingHorizontal: 14,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1a1f2a',
+    paddingHorizontal: 8,
+    paddingVertical: 8,
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    borderBottomWidth: 1,
+    borderBottomColor: palette.divider,
   },
-  title: { color: '#f4f7fc', fontSize: 18, fontWeight: '700' },
-  headerAction: { color: '#6b9ef5', fontSize: 15, fontWeight: '700' },
-  form: { padding: 14, gap: 10 },
-  prefillRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  prefillText: { color: '#9fb6d6', fontSize: 13 },
-  replyNote: { color: '#9fb6d6', fontSize: 12, lineHeight: 17 },
-  walletRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  walletText: { color: '#d7dbe3', fontSize: 12 },
-  walletButton: {
-    borderWidth: 1,
-    borderColor: '#2d3444',
-    borderRadius: 8,
-    paddingHorizontal: 10,
+  headerIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconDisabled: { opacity: 0.4 },
+  titleWrap: { alignItems: 'center', flex: 1 },
+  title: { color: palette.textPrimary, fontSize: 18, fontWeight: '600' },
+  sendStatus: { color: palette.accentSoft, fontSize: 11, marginTop: 1 },
+  form: { paddingBottom: 40 },
+  prefillRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  prefillText: { color: palette.accentSoft, fontSize: 13 },
+  fromRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: palette.divider,
+  },
+  fromLabel: { color: palette.textFaint, fontSize: 11, letterSpacing: 0.4 },
+  fromValue: { color: palette.textPrimary, fontSize: 14, marginTop: 1 },
+  fieldRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    minHeight: 48,
+    borderBottomWidth: 1,
+    borderBottomColor: palette.divider,
+  },
+  fieldLabel: {
+    color: palette.textFaint,
+    fontSize: 13,
+    width: 36,
+  },
+  fieldInput: {
+    flex: 1,
+    color: palette.textPrimary,
+    fontSize: 15,
+    paddingVertical: 12,
+  },
+  fieldGrow: {
+    flex: 1,
     paddingVertical: 6,
-    backgroundColor: '#151923',
   },
-  walletButtonText: { color: '#6b9ef5', fontWeight: '700', fontSize: 12 },
-  balance: { color: '#9fb6d6', fontSize: 12 },
-  input: {
-    minHeight: 44,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#252b38',
-    backgroundColor: '#151923',
-    color: '#d7dbe3',
-    paddingHorizontal: 12,
+  chipsWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingTop: 4,
+    paddingBottom: 2,
   },
+  chipInput: {
+    color: palette.textPrimary,
+    fontSize: 15,
+    paddingVertical: 6,
+    minHeight: 32,
+  },
+  ccToggle: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  subjectInput: { fontWeight: '600' },
   body: {
-    minHeight: 260,
+    minHeight: 320,
+    color: palette.textPrimary,
+    fontSize: 15,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    lineHeight: 22,
+  },
+  errorBanner: {
+    marginHorizontal: 16,
+    marginTop: 4,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#2a1a1f',
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#252b38',
-    backgroundColor: '#151923',
-    color: '#d7dbe3',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderColor: '#5a2a32',
   },
-  error: { color: '#ff9b9b', fontSize: 13, marginTop: 6 },
+  errorText: { color: palette.danger, fontSize: 13, flex: 1 },
 });
-

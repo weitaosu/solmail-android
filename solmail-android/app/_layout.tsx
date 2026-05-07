@@ -1,31 +1,45 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
+import { DarkTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import 'react-native-reanimated';
 
-import { useColorScheme } from '@/hooks/use-color-scheme';
 import { MobileWalletProvider } from '@/src/wallet/mobile-wallet-provider';
+import { palette } from '@/constants/colors';
 
 export const unstable_settings = {
   anchor: '(tabs)',
 };
 
-export default function RootLayout() {
-  const colorScheme = useColorScheme();
+const navTheme = {
+  ...DarkTheme,
+  colors: {
+    ...DarkTheme.colors,
+    background: palette.surface,
+    card: palette.surface,
+    border: palette.divider,
+    text: palette.textPrimary,
+    primary: palette.accent,
+    notification: palette.accent,
+  },
+};
 
+export default function RootLayout() {
   return (
-    <MobileWalletProvider>
-      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-        <Stack>
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          <Stack.Screen name="auth-callback" options={{ headerShown: false }} />
-          <Stack.Screen name="inbox" options={{ headerShown: false }} />
-          <Stack.Screen name="compose" options={{ headerShown: false }} />
-          <Stack.Screen name="thread/[id]" options={{ headerShown: false }} />
-          <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
-        </Stack>
-        <StatusBar style="auto" />
-      </ThemeProvider>
-    </MobileWalletProvider>
+    <SafeAreaProvider>
+      <MobileWalletProvider>
+        <ThemeProvider value={navTheme}>
+          <Stack screenOptions={{ contentStyle: { backgroundColor: palette.surface } }}>
+            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+            <Stack.Screen name="auth-callback" options={{ headerShown: false }} />
+            <Stack.Screen name="inbox" options={{ headerShown: false }} />
+            <Stack.Screen name="compose" options={{ headerShown: false, animation: 'slide_from_bottom' }} />
+            <Stack.Screen name="thread/[id]" options={{ headerShown: false }} />
+            <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+          </Stack>
+          <StatusBar style="light" backgroundColor={palette.surface} />
+        </ThemeProvider>
+      </MobileWalletProvider>
+    </SafeAreaProvider>
   );
 }
