@@ -266,7 +266,13 @@ export default function InboxScreen() {
     if (!iso) return '';
     const date = new Date(iso);
     if (Number.isNaN(date.getTime())) return '';
-    return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const now = new Date();
+    const isToday =
+      date.getFullYear() === now.getFullYear() &&
+      date.getMonth() === now.getMonth() &&
+      date.getDate() === now.getDate();
+    if (isToday) return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
   };
 
   const folderTitle =
@@ -332,7 +338,10 @@ export default function InboxScreen() {
                     <Text style={styles.threadTime}>{formatCompactTime(item.dateIso)}</Text>
                   </View>
                 </View>
-                <Text style={styles.threadSubject} numberOfLines={1}>
+                <Text
+                  style={[styles.threadSubject, item.isUnread && styles.threadSubjectUnread]}
+                  numberOfLines={1}
+                >
                   {item.subject}
                 </Text>
                 <Text style={styles.threadSnippet} numberOfLines={1}>
@@ -614,6 +623,7 @@ const styles = StyleSheet.create({
   },
   threadTime: { color: '#959cac', fontSize: 12, fontWeight: '500' },
   threadSubject: { color: '#d8dde8', fontSize: 13, marginTop: 1 },
+  threadSubjectUnread: { color: '#eef2fb', fontWeight: '700' },
   threadSnippet: { color: '#9ca4b4', fontSize: 12, marginTop: 1 },
   fab: {
     position: 'absolute',
