@@ -28,14 +28,43 @@
 
 ## Hackathon Submission (EasyA Consensus)
 
-- **Short summary (<150 chars)**: `TODO: add final short summary`
-- **Technical description (SDKs + sponsor tech)**: `TODO: add final technical description`
-<<<<<<< HEAD
+- **Short summary (<150 chars)**: Gives Seeker users paid email on Solana, releasing escrowed SOL only when the recipient sends a real reply judged by an on-device agent.
 - **Download APK**: [solmail-consensus-v1.apk](https://github.com/hrishabhayush/solmail-android/blob/main/solmail-consensus-v1.apk?raw=1)
-- **Canva slides**: `TODO: add Canva link`
-- **Demo video (with audio)**: `TODO: add video link`
-- **Screenshots**: `TODO: add screenshot links`
-- **Blockchain interaction explanation**: `TODO: add concise on-chain flow`
+- **Canva slides**: [view](https://www.canva.com/design/DAHI_FH735E/gESU0uzU_Jh14XliG4qeRQ/view?utm_content=DAHI_FH735E&utm_campaign=designshare&utm_medium=link2&utm_source=uniquelinks&utlId=habff5aefae)
+- **Demo video (with audio)**: [YouTube](https://www.youtube.com/watch?v=1gRK_v7hIPk)
+- **Screenshots**: see [section below](#screenshots)
+- **Technical description (SDKs + sponsor tech)**: see [section below](#technical-description)
+- **Blockchain interaction explanation**: see [section below](#blockchain-interaction)
+
+### Screenshots
+
+| Inbox | Thread | Compose | Reply check |
+|---|---|---|---|
+| <img src="solmail-android/screenshots/Screenshot%202026-05-07%20at%2011.38.23%20AM.png" width="200"> | <img src="solmail-android/screenshots/Screenshot%202026-05-07%20at%2011.38.38%20AM.png" width="200"> | <img src="solmail-android/screenshots/Screenshot%202026-05-07%20at%2011.39.46%20AM.png" width="200"> | <img src="solmail-android/screenshots/Screenshot%202026-05-07%20at%2011.40.13%20AM.png" width="200"> |
+
+### Technical description
+
+SolMail is a native Android Solana dApp built on three pieces of sponsor tech: an Anchor escrow program, Mobile Wallet Adapter with Seed Vault on Seeker, and solana-agent-kit for autonomous refunds. Backend on Cloudflare Workers, on top of the open-source Zero email framework.
+
+**Anchor program.** `create_escrow`, `release`, `withhold` over a PDA seeded on `["escrow", msg_id]`, so every email thread has a deterministic escrow. The mobile client builds raw `TransactionInstruction`s using 8-byte Anchor discriminators baked into [compose.tsx](solmail-android/app/compose.tsx), so the APK ships without the Anchor TypeScript SDK on-device.
+
+**MWA and Seed Vault.** Every send and claim is signed through `@solana-mobile/mobile-wallet-adapter-protocol-web3js`. `transact()` in [mwa.ts](solmail-android/src/wallet/mwa.ts) routes to Seed Vault on Seeker, where the key never leaves the secure element and the user gets a native biometric prompt, and falls back to Phantom or Solflare on any other Android device. One code path, two custody models, zero Seeker-specific code.
+
+**Autonomous refund agent.** `SolanaAgentKit` boots with a `KeypairWallet` from env. `processEmailReply` runs score, decide, then `releaseEscrowAction` or `withholdEscrowAction`, which call `program.methods.release()` and `withhold()` via Anchor server-side. Required because no human would sign their own refund.
+
+**Reply scoring.** LangChain `ChatOpenAI` returns 80 for genuine replies, 5 for empty, gibberish, spam, or prompt injection. `decide()` enforces `score >= 15`, server-side. Client sees only a boolean.
+
+**Cloudflare stack.** tRPC on Workers with six Durable Objects, Hyperdrive Postgres, Workers AI, Vectorize, R2, Queues, KV. Escrow settlement runs in `ctx.executionCtx.waitUntil()`, never blocking send. Escrow metadata rides in `X-Solmail-Sender-Pubkey` and `X-Solmail-Thread-Id` headers, so messages stay valid SMTP.
+
+**Uniquely enabled.** Seed Vault gives hardware key custody with no custom code. MWA ships one APK to Seeker and every other Android wallet. solana-agent-kit lets the server hold its own Solana wallet without ever touching user keys.
+
+### Blockchain interaction
+
+1. **Send.** The mobile app signs an `init_escrow` transaction via Mobile Wallet Adapter. On Seeker this routes to Seed Vault for biometric approval. The instruction creates an escrow PDA seeded by `["escrow", random_32_byte_thread_id]` and locks the sender's SOL on devnet.
+2. **Carry.** The 32-byte thread ID and the sender pubkey are embedded in the outgoing email as `X-Solmail-Thread-Id` and `X-Solmail-Sender-Pubkey` headers, keeping the message valid SMTP so it reaches plain Gmail too.
+3. **Reply.** The recipient opens the thread in the SolMail app. Hitting Send triggers a server-side reply-quality check. If the check passes, the app signs a `register_and_claim` instruction that closes the escrow PDA and transfers the lamports to the recipient's wallet.
+4. **Refund.** After every reply, a Cloudflare Worker async job (`processEmailReply` in [escrow-agent.ts](Zero/apps/server/src/routes/agent/escrow-agent.ts)) re-runs scoring authoritatively. On a fail verdict, the server's solana-agent-kit keypair signs `withhold` to refund the sender. No user signature required.
+5. **Settlement.** All four transactions (`init_escrow`, `register_and_claim`, `withhold`, plus account creation) are visible on the Solana devnet explorer and signed by hardware-backed keys on Seeker, or by Phantom/Solflare on other Android devices.
 
 ## About SolMail
 
