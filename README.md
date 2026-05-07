@@ -13,6 +13,7 @@
 
 ## Table of Contents
 
+- [Hackathon Submission (EasyA Consensus)](#hackathon-submission-easya-consensus)
 - [About SolMail](#about-solmail)
   - [Problem](#problem)
   - [Solution](#solution)
@@ -24,6 +25,15 @@
 - [License](#license)
 - [Links](#links)
 - [Support](#support)
+
+## Hackathon Submission (EasyA Consensus)
+
+- **Short summary (<150 chars)**: `TODO: add final short summary`
+- **Technical description (SDKs + sponsor tech)**: `TODO: add final technical description`
+- **Canva slides**: `TODO: add Canva link`
+- **Demo video (with audio)**: `TODO: add video link`
+- **Screenshots**: `TODO: add screenshot links`
+- **Blockchain interaction explanation**: `TODO: add concise on-chain flow`
 
 ## About SolMail
 
@@ -118,23 +128,9 @@ SolMail inherits the robust technology stack from Zero:
 - **Authentication**: Better Auth, Google OAuth
 - **Deployment**: Cloudflare Workers
 
-## Contributing
-
-Contributions are welcome! Please refer to the [Zero contributing guide](Zero/.github/CONTRIBUTING.md) for guidelines.
-
 ## License
 
 This project is licensed under the same license as the Zero framework. See the [LICENSE](Zero/LICENSE) file for details.
-
-## Links
-
-- **Website**: [SolMail](https://solmail.com)
-- **Base Framework**: [Zero](https://github.com/Mail-0/Zero)
-- **Contributors**: See [Zero Contributors](https://0.email/contributors)
-
-## Support
-
-For issues, questions, or contributions, please refer to the Zero project's issue tracker and documentation.
 
 ---
 
